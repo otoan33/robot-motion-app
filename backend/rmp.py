@@ -81,34 +81,37 @@ def plan_rmp_path(start, via, goal, max_vel, max_acc, lin_vel, lin_acc, rot_vel,
                   weights=(1.0, 0.3, 1e-5), time_limit: float = 120.0, tol: float = 1e-2) -> tuple[list[float], list[list[float]]]:
     q, qd, qg = np.radians(start), np.zeros(6), np.radians(goal)
     vmax, amax = np.radians(max_vel), np.radians(max_acc)
-    v_p, v_r = lin_vel / 1000, np.radians(rot_vel)
-    b_p, b_r = lin_acc / lin_vel, rot_acc / rot_vel
+    a_p, a_r = lin_acc / 1000, np.radians(rot_acc)
     w_p, w_r, w_q = weights
-    path = Path([arm.forward(np.radians(a))[0] for a in [start, *via, goal]], blend / 1000, v_p, lin_acc / 1000, v_r)
-    # 終点で止めるときの引き寄せの最大速度（最後の 5 mm・1° を最大加速度で詰める速さ）
-    last, v_end, w_end = len(path.S) - 1, np.sqrt(2 * lin_acc / 1000 * 0.005), np.sqrt(2 * np.radians(rot_acc) * np.radians(1))
+    path = Path([arm.forward(np.radians(a))[0] for a in [start, *via, goal]], blend / 1000, lin_vel / 1000, a_p, np.radians(rot_vel))
+    # 接線方向の進みは、速さの差に β = 最大加速度 / 最大速度 を掛けて合わせる（動き出しの加速度が最大加速度になる）
+    # 横ずれ・姿勢のずれ・終点の詰めは、経路の速度プロファイルの最後（v = ω_end·r）と同じ速さで収まる硬い臨界減衰（β = 2ω_end）で戻す。戻す加速度は最大加速度まで
+    last, b_t, b_fix = len(path.S) - 1, lin_acc / lin_vel, 2 * path.omega_end
 
     n, h = substeps(dt)
-    k, ts, qs = 0, [0.0], [q.copy()]
+    k, sd, ts, qs = 0, 0.0, [0.0], [q.copy()]
     while ts[-1] < time_limit:
         for _ in range(n):
             T, J, Jdqd = jacobian(q, qd)
             xd = J @ qd
             k = path.nearest(T[:3, 3], k)
-            t_hat, sd = path.tangent[k], max(path.tangent[k] @ xd[:3], 0)
-            # 位置: 最寄り点へのずれ（終点以外は接線方向を除いた横ずれ）を戻しつつ、経路の速度で接線方向に進む
-            # 速度プロファイルの変化と曲がるための向心加速度は、実際の進む速さ sd を使って先回りで与える（遅れても急がない）
-            # 終点では、最後の 5 mm・1° を詰める速さと最大加速度に合わせた引き寄せで素早く止める（通常の係数のままだと、着いたときの勢いで行き過ぎて戻りが遅い）
+            # 接線方向に進む速さ sd と、その変化（ひとつ前の刻みとの差）から求めた実際の加速度 sdd
+            t_hat, sd_prev = path.tangent[k], sd
+            sd = max(t_hat @ xd[:3], 0)
+            sdd = (sd - sd_prev) / h
+            # 位置: 経路の途中は横ずれ（接線方向を除いたずれ）を硬く戻しつつ、接線方向は速度プロファイルの速さで進む
+            # 速度プロファイルの変化と曲がるための向心加速度は、実際の進む速さ sd を使って先回りで与える（遅れても急がない）。終点では残りのずれを同じ硬さで戻して止める
             e = path.points[k] - T[:3, 3]
-            if k < last: a_p = attractor(e - t_hat * (t_hat @ e), xd[:3] - path.speed[k] * t_hat, v_p, b_p) + path.dspeed[k] * sd * t_hat + sd**2 * path.kappa[k]
-            else: a_p = attractor(e, xd[:3], v_end, lin_acc / 1000 / v_end)
-            # 姿勢: 最寄り点の姿勢へ、経路に沿って回る角速度・角加速度込みで引き寄せる
+            if k < last:
+                N = np.eye(3) - np.outer(t_hat, t_hat)
+                a_lin = attractor(N @ e, N @ xd[:3], a_p / b_fix, b_fix) + (b_t * (path.speed[k] - t_hat @ xd[:3]) + path.dspeed[k] * sd) * t_hat + sd**2 * path.kappa[k]
+            else: a_lin = attractor(e, xd[:3], a_p / b_fix, b_fix)
+            # 姿勢: 最寄り点の姿勢へ、経路に沿って回る角速度・角加速度込みで引き寄せる（角加速度は、予定ではなく実際の進み方の加速度 sdd から求める）
             e_r = rotvec(path.orientation[k] @ T[:3, :3].T)
-            if k < last: a_r = attractor(e_r, xd[3:] - path.rot_rate[k] * sd, v_r, b_r) + path.rot_rate[k] * path.dspeed[k] * sd + path.drot_rate[k] * sd**2
-            else: a_r = attractor(e_r, xd[3:], w_end, np.radians(rot_acc) / w_end)
+            a_rot = attractor(e_r, xd[3:] - path.rot_rate[k] * sd, a_r / b_fix, b_fix) + path.rot_rate[k] * sdd + path.drot_rate[k] * sd**2
             # 計量は横ずれ方向を強く、接線方向を弱くする（障害物回避などと合成したとき、横ずれを優先して抑えつつ進みを譲る）
             # 関節は特異点付近で解を安定させるためのごく弱い正則化（強いと手首など腕の短い関節の動きが鈍り、収束が遅くなる）
-            q, qd = step(q, qd, [(J[:3], a_p - Jdqd[:3], w_p * (np.eye(3) - 0.5 * np.outer(t_hat, t_hat))), (J[3:], a_r - Jdqd[3:], w_r * np.eye(3)),
+            q, qd = step(q, qd, [(J[:3], a_lin - Jdqd[:3], w_p * (np.eye(3) - 0.5 * np.outer(t_hat, t_hat))), (J[3:], a_rot - Jdqd[3:], w_r * np.eye(3)),
                                  (np.eye(6), np.zeros(6), w_q * np.eye(6))], vmax, amax, h)
         ts.append(len(ts) * dt)
         qs.append(q.copy())

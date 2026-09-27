@@ -70,14 +70,16 @@ class Path:
 
         # 速度の上限: 最大速度・曲がるときの向心加速度・姿勢の角速度。さらに最大加速度で加減速できるよう、前後から絞る
         # （終点は 0。始点は動き出せるよう 5 mm 分だけ速度を持たせる）
-        speed = np.minimum.reduce([np.full(len(self.S), v), np.sqrt(a / (np.linalg.norm(self.kappa, axis=1) + 1e-12)), w_max / (rate + 1e-12)])
+        # 最後の 5 mm は残り距離に比例（v = ω_end·r）させ、終点の引き寄せ（同じ ω_end の臨界減衰）へ勢いを残さずに引き継ぐ
+        self.omega_end = np.sqrt(2 * a / 0.005)
+        speed = np.minimum.reduce([np.full(len(self.S), v), np.sqrt(a / (np.linalg.norm(self.kappa, axis=1) + 1e-12)), w_max / (rate + 1e-12),
+                                   self.omega_end * (self.S[-1] - self.S)])
         speed[0], speed[-1] = min(speed[0], np.sqrt(2 * a * 0.005)), 0
         dS = np.diff(self.S)
         for i in range(1, len(speed)): speed[i] = min(speed[i], np.sqrt(speed[i - 1] ** 2 + 2 * a * dS[i - 1]))
         for i in range(len(speed) - 2, -1, -1): speed[i] = min(speed[i], np.sqrt(speed[i + 1] ** 2 + 2 * a * dS[i]))
-        # 速度の弧長微分（加減速の先回り用）。終点に着いたら経路は終わりなので 0 にする（残すと強いブレーキとして働き、最後の詰めが遅くなる）
+        # 速度の弧長微分（加減速の先回り用）
         self.speed, self.dspeed = speed, np.gradient(speed, self.S)
-        self.dspeed[-1] = 0
 
     # 先端位置 x に最も近い点の番号。後戻りしないよう、前回の番号 k から前方 50 mm の範囲で探す
     def nearest(self, x: np.ndarray, k: int) -> int:
