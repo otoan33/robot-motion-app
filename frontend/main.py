@@ -10,7 +10,7 @@ client = httpx.AsyncClient(base_url=os.environ.get("BACKEND_URL", "http://127.0.
 viser_api = httpx.AsyncClient(base_url=os.environ.get("VISER_API_URL", "http://127.0.0.1:8000"))
 
 # 動作モードの表示名
-MODE_LABELS = {"ptp": "PTP（関節補間・台形速度）"}
+MODE_LABELS = {"ptp": "PTP（関節補間・台形速度）", "lin": "LIN（直線補間・台形速度）"}
 
 
 @ui.page("/")
@@ -30,34 +30,48 @@ async def index(request: Request):
         with ui.column().classes("w-96 shrink-0 h-[calc(100vh-2rem)] overflow-y-auto no-wrap"):
             ui.label("robot-motion").classes("text-2xl font-bold")
 
-            # 動作モード（今は PTP のみ）
+            # 動作モード（PTP: 関節補間、LIN: 先端の直線補間）
             with ui.card().classes("w-full"):
                 ui.label("動作モード").classes("text-lg font-bold")
                 mode = ui.select({m: MODE_LABELS.get(m, m) for m in info["modes"]}, value=info["modes"][0]).classes("w-full")
 
             # 開始位置・目標位置 [deg]。「表示」で robot-viser にその姿勢を表示して確認する
             async def show_pose(inputs): (await viser_api.post("/joints", json={"angles": [n.value for n in inputs]})).raise_for_status()
-            with ui.card().classes("w-full"):
-                ui.label("開始位置 [deg]").classes("text-lg font-bold")
-                start = joint_inputs([0] * 6)
-                ui.button("表示", on_click=lambda: show_pose(start)).props("flat")
-            with ui.card().classes("w-full"):
-                ui.label("目標位置 [deg]").classes("text-lg font-bold")
-                goal = joint_inputs([30, -30, 30, 0, 45, 0])
-                with ui.row():
-                    ui.button("表示", on_click=lambda: show_pose(goal)).props("flat")
-                    # 往復動作を作りやすいよう、開始と目標を入れ替える
-                    def swap():
-                        for s, g in zip(start, goal): s.value, g.value = g.value, s.value
-                    ui.button("開始⇄目標", on_click=swap).props("flat")
+            # 入力中の関節角度での先端位置・姿勢を表示する（LIN の直線の両端の確認用）
+            async def update_tcp(inputs, label):
+                if any(n.value is None for n in inputs): return
+                tcp = (await client.post("/fk", json={"angles": [n.value for n in inputs]})).json()
+                label.text = "先端 XYZ [mm] " + ", ".join(f"{v:.1f}" for v in tcp["position"]) + " / RPY [deg] " + ", ".join(f"{v:.1f}" for v in tcp["rpy"])
+            def pose_card(title: str, values: list[float]):
+                with ui.card().classes("w-full"):
+                    ui.label(title).classes("text-lg font-bold")
+                    inputs = joint_inputs(values)
+                    tcp = ui.label().classes("text-xs text-gray-500")
+                    for n in inputs: n.on_value_change(lambda: update_tcp(inputs, tcp))
+                    ui.timer(0, lambda: update_tcp(inputs, tcp), once=True)
+                    buttons = ui.row()
+                    with buttons: ui.button("表示", on_click=lambda: show_pose(inputs)).props("flat")
+                return inputs, buttons
+            start, _ = pose_card("開始位置 [deg]", [0, -20, 30, 0, 40, 0])
+            goal, goal_buttons = pose_card("目標位置 [deg]", [40, -10, 20, 0, 60, 30])
+            with goal_buttons:
+                # 往復動作を作りやすいよう、開始と目標を入れ替える
+                def swap():
+                    for s, g in zip(start, goal): s.value, g.value = g.value, s.value
+                ui.button("開始⇄目標", on_click=swap).props("flat")
 
-            # 関節ごとの速度・加速度の上限と、サンプリング周期・動作時間
+            # 関節ごとの速度・加速度の上限（LIN でも関節がこれを超えるなら全体をゆっくりにする）と、LIN の先端の速度・加速度、サンプリング周期・動作時間
             with ui.card().classes("w-full"):
                 ui.label("制限").classes("text-lg font-bold")
-                ui.label("最大速度 [deg/s]")
+                ui.label("関節の最大速度 [deg/s]")
                 max_vel = joint_inputs(defaults["max_vel"], 6)
-                ui.label("最大加速度 [deg/s²]")
+                ui.label("関節の最大加速度 [deg/s²]")
                 max_acc = joint_inputs(defaults["max_acc"], 6)
+                with ui.grid(columns=2).classes("w-full").bind_visibility_from(mode, "value", value="lin"):
+                    lin_vel = ui.number("先端速度 [mm/s]", value=defaults["lin_vel"], min=0)
+                    lin_acc = ui.number("先端加速度 [mm/s²]", value=defaults["lin_acc"], min=0)
+                    rot_vel = ui.number("姿勢の角速度 [deg/s]", value=defaults["rot_vel"], min=0)
+                    rot_acc = ui.number("姿勢の角加速度 [deg/s²]", value=defaults["rot_acc"], min=0)
                 with ui.grid(columns=2).classes("w-full"):
                     dt = ui.number("周期 dt [s]", value=defaults["dt"], min=0.001, step=0.001, format="%.3f")
                     duration = ui.number("動作時間 [s]", min=0).props("hint=空欄なら制限内で最短")
@@ -65,8 +79,11 @@ async def index(request: Request):
             # 生成した軌道をグラフで確認し、robot-viser での再生や CSV 保存に使う
             async def generate():
                 req = {"mode": mode.value, "start": [n.value for n in start], "goal": [n.value for n in goal], "max_vel": [n.value for n in max_vel],
-                       "max_acc": [n.value for n in max_acc], "dt": dt.value, "duration": duration.value}
-                res = await client.post("/trajectory/csv", json=req)
+                       "max_acc": [n.value for n in max_acc], "lin_vel": lin_vel.value, "lin_acc": lin_acc.value, "rot_vel": rot_vel.value, "rot_acc": rot_acc.value,
+                       "dt": dt.value, "duration": duration.value}
+                # LIN は逆運動学が解けない経路などで生成できないことがあるため、理由を表示する（時間がかかる経路もあるのでタイムアウトなし）
+                res = await client.post("/trajectory/csv", json=req, timeout=None)
+                if res.status_code == 422: return ui.notify(res.json()["detail"], type="negative", multi_line=True)
                 res.raise_for_status()
                 state["csv"] = res.text
                 # CSV（ヘッダ t,joint1..6）をグラフの系列にする

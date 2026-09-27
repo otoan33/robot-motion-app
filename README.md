@@ -1,6 +1,6 @@
 # robot-motion-app
 
-robot-viser-app で再生する「時系列の関節角度軌道」を生成するアプリ。フロントエンドを NiceGUI、バックエンドを FastAPI で作り、構成は robot-viser-app に合わせている。現在の動作モードは **PTP（関節補間・台形速度）** のみ。
+robot-viser-app で再生する「時系列の関節角度軌道」を生成するアプリ。フロントエンドを NiceGUI、バックエンドを FastAPI で作り、構成は robot-viser-app に合わせている。動作モードは **PTP（関節補間）** と **LIN（先端の直線補間）** で、どちらも台形速度。
 
 ## 構成
 
@@ -10,8 +10,10 @@ robot-motion-app/
 ├── .dockerignore             # ルートをコンテキストにするビルド用（requirements.txt のみ送る）
 ├── .devcontainer/            # VSCode Dev Container 設定
 ├── backend/                  # FastAPI（軌道生成 API :8100）
-│   ├── main.py               # API 定義（/modes, /trajectory, /trajectory/csv）
-│   ├── planner.py            # 軌道生成（PTP・台形速度）
+│   ├── main.py               # API 定義（/modes, /fk, /trajectory, /trajectory/csv）
+│   ├── planner.py            # 軌道生成（台形速度の PTP・LIN）
+│   ├── kinematics.py         # URDF からの順運動学・逆運動学
+│   ├── assets/arms/robotA/arm.urdf  # robot-viser-app と同じアームの URDF（関節の位置・回転軸だけを使う）
 │   ├── requirements.txt
 │   └── Dockerfile
 └── frontend/                 # NiceGUI（画面 :8180）
@@ -64,10 +66,10 @@ Dev Container で開いた場合は、backend（`--reload` 付き）と frontend
 
 | 項目 | 内容 |
 |---|---|
-| 動作モード | 生成する動作の種類（現在は PTP のみ） |
-| 開始位置 / 目標位置 | J1〜J6 [deg]。「表示」で robot-viser にその姿勢を表示する。「開始⇄目標」で入れ替える |
-| 制限 | 関節ごとの最大速度 [deg/s]・最大加速度 [deg/s²]、周期 dt [s]、動作時間 [s]（空欄なら制限内で最短） |
-| 生成 | 軌道を生成し、関節角度の時系列グラフを表示する |
+| 動作モード | PTP（関節補間）/ LIN（先端の直線補間） |
+| 開始位置 / 目標位置 | J1〜J6 [deg]。その姿勢での先端（tool0）の位置 [mm]・姿勢 RPY [deg] を下に表示する。「表示」で robot-viser にその姿勢を表示する。「開始⇄目標」で入れ替える |
+| 制限 | 関節ごとの最大速度 [deg/s]・最大加速度 [deg/s²]、LIN のときは先端の速度 [mm/s]・加速度 [mm/s²]・姿勢の角速度 [deg/s]・角加速度 [deg/s²]、周期 dt [s]、動作時間 [s]（空欄なら制限内で最短） |
+| 生成 | 軌道を生成し、関節角度の時系列グラフを表示する。生成できないとき（LIN で関節の形態が違うなど）は理由を表示する |
 | 再生 | 生成した軌道を robot-viser に送って再生する（シーク・停止は viser 画面の Time スライダーと Play/Stop） |
 | CSV 保存 | 生成した軌道を CSV でダウンロードする |
 
@@ -82,11 +84,24 @@ Dev Container で開いた場合は、backend（`--reload` 付き）と frontend
 - 動作時間を指定すると、最短時間より長い場合だけその時間にする。このとき加速度は上限のまま、頂点速度を下げて時間を合わせる
 - 時刻は 0 から dt 刻みで、終端（動作時間ちょうど）を必ず含む
 
+### LIN（先端の直線補間・台形速度）
+
+開始・目標の関節角度から順運動学で先端（URDF の `tool0`、ハンドなしのフランジ）の姿勢を求め、その間を補間する。
+
+- 位置は直線、姿勢は開始→目標の回転を一定の回転軸まわりに補間し、同じ経路パラメータ s（台形速度）で動かす
+- s の上限は、先端の速度・加速度（移動距離に対して）と姿勢の角速度・角加速度（回転角に対して）のうち厳しい方で決まる
+- 各時刻の関節角度は、ひとつ前の解を初期値にした逆運動学（減衰最小二乗法）で求める。開始の関節の形態のまま連続にたどる
+- 関節の速度・加速度が上限を超える場合は、時間軸を一様に引き延ばして（速度 1/r、加速度 1/r²）上限内に収める。特異点の近くを通る経路はそのぶん長い時間になる
+- 生成できない場合は 422 で理由を返す
+  - 経路上で逆運動学が解けない（特異点・可動範囲外）
+  - 目標の関節角度が、先端の姿勢は同じでも開始と別の形態（手首の反転など）で、直線補間の終点と一致しない（±360° の違いは同じとみなす）
+
 ## API
 
 | メソッド | パス | 内容 |
 |---|---|---|
-| GET | `/modes` | 選べる動作モードと既定値（最大速度・最大加速度・dt） |
+| GET | `/modes` | 選べる動作モードと既定値（関節・先端の速度と加速度、dt） |
+| POST | `/fk` | 関節角度 `{"angles": [6]}` [deg] での先端の位置 [mm] と姿勢 RPY [deg] |
 | POST | `/trajectory` | 軌道を生成して JSON（`times`, `angles`, `duration_sec`, `num_points`）で返す |
 | POST | `/trajectory/csv` | 軌道を生成して CSV テキストで返す |
 
@@ -99,12 +114,16 @@ Dev Container で開いた場合は、backend（`--reload` 付き）と frontend
   "goal": [30, -30, 30, 0, 45, 0],
   "max_vel": [180, 180, 180, 180, 180, 180],
   "max_acc": [720, 720, 720, 720, 720, 720],
+  "lin_vel": 250,
+  "lin_acc": 1000,
+  "rot_vel": 90,
+  "rot_acc": 360,
   "dt": 0.01,
   "duration": null
 }
 ```
 
-`max_vel`・`max_acc`・`dt`・`duration` は省略できる（既定値は `/modes` の値、`duration` は最短）。
+`mode` は `"ptp"` か `"lin"`。`lin_vel`・`lin_acc`（先端 [mm/s]・[mm/s²]）と `rot_vel`・`rot_acc`（姿勢 [deg/s]・[deg/s²]）は LIN だけで使う。`mode` 以外の制限・`dt`・`duration` は省略できる（既定値は `/modes` の値、`duration` は最短）。
 
 ```bash
 curl -X POST http://localhost:8100/trajectory/csv -H 'Content-Type: application/json' \
