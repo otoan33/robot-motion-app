@@ -19,10 +19,13 @@ robot-motion-app/
 │   ├── assets/arms/robotA/arm.urdf  # robot-viser-app と同じアームの URDF（関節の位置・回転軸だけを使う）
 │   ├── requirements.txt
 │   └── Dockerfile
-└── frontend/                 # NiceGUI（画面 :8180）
-    ├── main.py               # 設定パネル + robot-viser の viser 画面（iframe）
-    ├── requirements.txt
-    └── Dockerfile
+├── frontend/                 # NiceGUI（画面 :8180）
+│   ├── main.py               # 設定パネル + robot-viser の viser 画面（iframe）
+│   ├── requirements.txt
+│   └── Dockerfile
+├── scripts/
+│   └── make_videos.py        # ポリシーごとのサンプル動画を robot-viser-app で録画して作る
+└── docs/videos/              # サンプル動画（ポリシーごとに 1 本）
 ```
 
 ### 通信の流れ
@@ -156,6 +159,31 @@ robot-viser-app に登録した障害物（球・直方体・カプセル）と�
   | 球（直線の 22 mm 横を通る） | 22 mm | 最小 53 mm、7.2 秒 | 最小 31 mm、5.0 秒（経路から 10 mm 逃げて戻る） |
   | 壁 400×400 mm（行く手をふさぐ） | − | 手前で止まる（局所解） | 手前で止まる |
 - 目標到達 RMP は障害物を回り込んで目標へ着く。経路追従は経路の近くの障害物なら少し逃げて経路へ戻るが、経路が障害物を通り抜ける場合は止まる（経路の形を守るポリシーのため）。どちらも局所的なポリシーなので、行く手をふさぐ大きな障害物は越えられない（経由点を足すなどで経路を与える）
+
+## サンプル動画
+
+`docs/videos/` に、ポリシーごとに 2〜3 個のサンプル動作を録画した動画がある。左は robot-viser-app の 3D 表示、右は関節角度と、先端の速さ（障害物回避の動画では近似球と障害物の最小距離）の時系列で、赤い縦線が今の時刻。
+
+| 動画 | ポリシー | サンプル |
+|---|---|---|
+| `01_ptp.mp4` | PTP（関節補間・台形速度、関節 30 deg/s・60 deg/s²） | A → B、B → C、C → A |
+| `02_lin.mp4` | LIN（直線補間・台形速度、250 mm/s・500 mm/s²） | A → B、B → C、C → A |
+| `03_rmp.mp4` | RMP 目標到達ポリシー | A → B、B → C、C → A |
+| `04_rmp_path.mp4` | RMP 経路追従（経由点の折れ線） | 経由点 1・角の丸め 50 mm、経由点 2・丸め 100 mm、経由点 1・丸め 0（経由点で止まる） |
+| `05_rmp_avoid.mp4` | RMP ＋ 障害物回避 | 目標到達で先端の直線上の球を避ける、目標到達で柱を避ける、経路追従で経路の横の球を避ける |
+
+姿勢は A = `[0, -20, 30, 0, 40, 0]`、B = `[40, -10, 20, 0, 60, 30]`、C = `[-35, 5, 10, 0, 45, -30]`（関節角度 [deg]）。PTP・LIN・RMP は同じ A → B → C → A なので、ポリシーの違いを比べられる。障害物回避のサンプルの球と柱は、回避なしだとそれぞれ 79 mm・94 mm めり込む位置に置いている。
+
+撮り直すときは、robot-motion-app と、衝突判定ありの robot-viser-app（`COLLISION=1 docker compose up -d`）を起動した状態で、プロジェクト直下から実行する（手順の詳細は `scripts/make_videos.py` の先頭）。他のブラウザで viser 画面を開いていると、そちらのカメラで描画されることがあるので閉じておく。1 コマの描画に 0.4 秒ほどかかるため、全部で 15 分ほどかかる。
+
+```bash
+docker run --rm --network host -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/work -w /work \
+    mcr.microsoft.com/playwright/python:v1.63.0-noble \
+    sh -c "pip install -q --user --break-system-packages playwright==1.63.0 numpy matplotlib pillow imageio imageio-ffmpeg httpx && \
+           xvfb-run -a -s '-screen 0 1920x1080x24' python scripts/make_videos.py"
+```
+
+`--dry-run` で録画せずに各サンプルの生成結果だけを確認でき、`--only 2 5` のように番号を指定するとその動画だけを作る。
 
 ## API
 
