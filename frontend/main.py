@@ -10,7 +10,7 @@ client = httpx.AsyncClient(base_url=os.environ.get("BACKEND_URL", "http://127.0.
 viser_api = httpx.AsyncClient(base_url=os.environ.get("VISER_API_URL", "http://127.0.0.1:8000"))
 
 # 動作モードの表示名
-MODE_LABELS = {"ptp": "PTP（関節補間・台形速度）", "lin": "LIN（直線補間・台形速度）", "rmp": "PTP（RMP 目標到達ポリシー）"}
+MODE_LABELS = {"ptp": "PTP（関節補間・台形速度）", "lin": "LIN（直線補間・台形速度）", "rmp": "PTP（RMP 目標到達ポリシー）", "rmp_path": "経路追従（RMP・経由点の折れ線）"}
 
 
 @ui.page("/")
@@ -30,7 +30,7 @@ async def index(request: Request):
         with ui.column().classes("w-96 shrink-0 h-[calc(100vh-2rem)] overflow-y-auto no-wrap"):
             ui.label("robot-motion").classes("text-2xl font-bold")
 
-            # 動作モード（PTP: 関節補間、LIN: 先端の直線補間、RMP: 目標到達ポリシーによる PTP）
+            # 動作モード（PTP: 関節補間、LIN: 先端の直線補間、RMP: 目標到達ポリシーによる PTP、経路追従: 経由点の折れ線に沿う RMP）
             with ui.card().classes("w-full"):
                 ui.label("動作モード").classes("text-lg font-bold")
                 mode = ui.select({m: MODE_LABELS.get(m, m) for m in info["modes"]}, value=info["modes"][0]).classes("w-full")
@@ -43,7 +43,7 @@ async def index(request: Request):
                 tcp = (await client.post("/fk", json={"angles": [n.value for n in inputs]})).json()
                 label.text = "先端 XYZ [mm] " + ", ".join(f"{v:.1f}" for v in tcp["position"]) + " / RPY [deg] " + ", ".join(f"{v:.1f}" for v in tcp["rpy"])
             def pose_card(title: str, values: list[float]):
-                with ui.card().classes("w-full"):
+                with ui.card().classes("w-full") as card:
                     ui.label(title).classes("text-lg font-bold")
                     inputs = joint_inputs(values)
                     tcp = ui.label().classes("text-xs text-gray-500")
@@ -51,34 +51,49 @@ async def index(request: Request):
                     ui.timer(0, lambda: update_tcp(inputs, tcp), once=True)
                     buttons = ui.row()
                     with buttons: ui.button("表示", on_click=lambda: show_pose(inputs)).props("flat")
-                return inputs, buttons
-            start, _ = pose_card("開始位置 [deg]", [0, -20, 30, 0, 40, 0])
-            goal, goal_buttons = pose_card("目標位置 [deg]", [40, -10, 20, 0, 60, 30])
+                return inputs, buttons, card
+            start, _, _ = pose_card("開始位置 [deg]", [0, -20, 30, 0, 40, 0])
+
+            # 経路追従の経由点（開始→経由点→目標の順に先端位置を結ぶ）。追加時は開始と目標の中間の関節角度を初期値にする
+            vias = []
+            def add_via():
+                with via_box:
+                    inputs, buttons, card = pose_card("経由点 [deg]", [(s.value + g.value) / 2 for s, g in zip(start, goal)])
+                    with buttons: ui.button("削除", on_click=lambda: (vias.remove(inputs), card.delete())).props("flat color=negative")
+                vias.append(inputs)
+            with ui.column().classes("w-full").bind_visibility_from(mode, "value", value="rmp_path"):
+                via_box = ui.column().classes("w-full")
+                ui.button("経由点を追加", on_click=add_via).props("flat")
+
+            goal, goal_buttons, _ = pose_card("目標位置 [deg]", [40, -10, 20, 0, 60, 30])
             with goal_buttons:
-                # 往復動作を作りやすいよう、開始と目標を入れ替える
+                # 往復動作を作りやすいよう、開始と目標を入れ替える（経由点は順番を逆にする）
                 def swap():
-                    for s, g in zip(start, goal): s.value, g.value = g.value, s.value
+                    rows = [start, *vias, goal]
+                    for row, values in zip(rows, [[n.value for n in r] for r in rows][::-1]):
+                        for n, v in zip(row, values): n.value = v
                 ui.button("開始⇄目標", on_click=swap).props("flat")
 
-            # 関節ごとの速度・加速度の上限（LIN・RMP でも関節はこれを超えない）と、LIN・RMP の先端の速度・加速度、サンプリング周期・動作時間（RMP はポリシーで決まるので使わない）
+            # 関節ごとの速度・加速度の上限（LIN・RMP でも関節はこれを超えない）と、LIN・RMP の先端の速度・加速度、経路追従の角の丸め、サンプリング周期・動作時間（RMP はポリシーで決まるので使わない）
             with ui.card().classes("w-full"):
                 ui.label("制限").classes("text-lg font-bold")
                 ui.label("関節の最大速度 [deg/s]")
                 max_vel = joint_inputs(defaults["max_vel"], 6)
                 ui.label("関節の最大加速度 [deg/s²]")
                 max_acc = joint_inputs(defaults["max_acc"], 6)
-                with ui.grid(columns=2).classes("w-full").bind_visibility_from(mode, "value", backward=lambda m: m in ("lin", "rmp")):
+                with ui.grid(columns=2).classes("w-full").bind_visibility_from(mode, "value", backward=lambda m: m in ("lin", "rmp", "rmp_path")):
                     lin_vel = ui.number("先端速度 [mm/s]", value=defaults["lin_vel"], min=0)
                     lin_acc = ui.number("先端加速度 [mm/s²]", value=defaults["lin_acc"], min=0)
                     rot_vel = ui.number("姿勢の角速度 [deg/s]", value=defaults["rot_vel"], min=0)
                     rot_acc = ui.number("姿勢の角加速度 [deg/s²]", value=defaults["rot_acc"], min=0)
+                    blend = ui.number("角の丸め [mm]", value=50, min=0).props('hint="0 なら経由点で止まる"').bind_visibility_from(mode, "value", value="rmp_path")
                 with ui.grid(columns=2).classes("w-full"):
                     dt = ui.number("周期 dt [s]", value=defaults["dt"], min=0.001, step=0.001, format="%.3f")
-                    duration = ui.number("動作時間 [s]", min=0).props("hint=空欄なら制限内で最短").bind_visibility_from(mode, "value", backward=lambda m: m != "rmp")
+                    duration = ui.number("動作時間 [s]", min=0).props("hint=空欄なら制限内で最短").bind_visibility_from(mode, "value", backward=lambda m: m in ("ptp", "lin"))
 
             # 生成した軌道をグラフで確認し、robot-viser での再生や CSV 保存に使う
             async def generate():
-                req = {"mode": mode.value, "start": [n.value for n in start], "goal": [n.value for n in goal], "max_vel": [n.value for n in max_vel],
+                req = {"mode": mode.value, "start": [n.value for n in start], "via": [[n.value for n in v] for v in vias], "goal": [n.value for n in goal], "blend": blend.value, "max_vel": [n.value for n in max_vel],
                        "max_acc": [n.value for n in max_acc], "lin_vel": lin_vel.value, "lin_acc": lin_acc.value, "rot_vel": rot_vel.value, "rot_acc": rot_acc.value,
                        "dt": dt.value, "duration": duration.value}
                 # LIN・RMP は逆運動学が解けない経路や目標へ収束しない場合などに生成できないため、理由を表示する（時間がかかる経路もあるのでタイムアウトなし）
