@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from backend.planner import plan_lin, plan_ptp, tcp_pose
+from backend.rmp import plan_rmp
 
 app = FastAPI(title="robot-motion API")
 
@@ -17,13 +18,14 @@ def _(_request: Request, e: ValueError):
 # 6軸アーム専用のため、関節ごとの値は常に6個
 Joints = Annotated[list[float], Field(min_length=6, max_length=6)]
 
-# frontend の初期値に使う既定の設定（dt はロボットログと同じ 10ms）。lin_* / rot_* は LIN の先端の速度・加速度
+# frontend の初期値に使う既定の設定（dt はロボットログと同じ 10ms）。lin_* / rot_* は LIN・RMP の先端の速度・加速度
 DEFAULTS = {"max_vel": [180.0] * 6, "max_acc": [720.0] * 6, "lin_vel": 250.0, "lin_acc": 1000.0, "rot_vel": 90.0, "rot_acc": 360.0, "dt": 0.01}
 
 
-# 軌道の生成条件。mode で動作の種類を切り替える（ptp: 関節補間、lin: 先端の直線補間）
+# 軌道の生成条件。mode で動作の種類を切り替える（ptp: 関節補間、lin: 先端の直線補間、rmp: RMP の目標到達ポリシー）
+# duration は ptp・lin だけで使う（rmp の動作時間はポリシーで決まる）
 class TrajectoryRequest(BaseModel):
-    mode: Literal["ptp", "lin"] = "ptp"
+    mode: Literal["ptp", "lin", "rmp"] = "ptp"
     start: Joints
     goal: Joints
     max_vel: Joints = DEFAULTS["max_vel"]
@@ -40,13 +42,15 @@ class TrajectoryRequest(BaseModel):
 def generate(req: TrajectoryRequest) -> tuple[list[float], list[list[float]]]:
     if req.mode == "lin":
         return plan_lin(req.start, req.goal, req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.dt, req.duration)
+    if req.mode == "rmp":
+        return plan_rmp(req.start, req.goal, req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.dt)
     return plan_ptp(req.start, req.goal, req.max_vel, req.max_acc, req.dt, req.duration)
 
 
 # 選べる動作モードと既定の設定を返す
 @app.get("/modes")
 def get_modes():
-    return {"modes": ["ptp", "lin"], "defaults": DEFAULTS}
+    return {"modes": ["ptp", "lin", "rmp"], "defaults": DEFAULTS}
 
 
 # 関節角度 [deg] での先端（tool0）の位置 [mm] と姿勢 roll / pitch / yaw [deg] を返す

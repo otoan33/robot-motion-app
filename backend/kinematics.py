@@ -52,14 +52,17 @@ class Arm:
                 i += 1
         return T, axes
 
+    # 先端の 4x4 変換と幾何ヤコビアン（6x6。上3行が並進速度、下3行が角速度。各列: 回転軸 × 関節から先端へのベクトル、回転軸）
+    def jacobian(self, q) -> tuple[np.ndarray, np.ndarray]:
+        T, axes = self.forward(q)
+        return T, np.array([np.concatenate([np.cross(a, T[:3, 3] - p), a]) for p, a in axes]).T
+
     # 目標の先端姿勢 target（4x4）になる関節角度を、初期値 q から減衰最小二乗法で探す。誤差（位置 m・回転 rad のノルム）も返す
     def inverse(self, target: np.ndarray, q, iters: int = 50, damping: float = 1e-3) -> tuple[np.ndarray, float]:
         q = np.array(q, float)
         for _ in range(iters):
-            T, axes = self.forward(q)
+            T, J = self.jacobian(q)
             e = np.concatenate([target[:3, 3] - T[:3, 3], rotvec(target[:3, :3] @ T[:3, :3].T)])
             if np.linalg.norm(e) < 1e-10: break
-            # 幾何ヤコビアン（各列: 回転軸 × 関節から先端へのベクトル、回転軸）
-            J = np.array([np.concatenate([np.cross(a, T[:3, 3] - p), a]) for p, a in axes]).T
             q += J.T @ np.linalg.solve(J @ J.T + damping**2 * np.eye(6), e)
         return q, float(np.linalg.norm(e))
