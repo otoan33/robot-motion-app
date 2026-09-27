@@ -1,0 +1,22 @@
+# ビルド成果物（exe / インストーラ）
+dist/
+build/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# 環境変数・ローカル設定
+.env
+.env.*
+
+# エディタ / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+

@@ -1,0 +1,27 @@
+// For format details, see https://aka.ms/devcontainer.json.
+{
+	"name": "robot-motion-app",
+	"build": {
+		"context": "..",
+		"dockerfile": "Dockerfile"
+	},
+
+	// プロジェクト全体を /workspace にマウントし、編集がそのまま反映されるようにする
+	"workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+	"workspaceFolder": "/workspace",
+
+	// ホストで動いている robot-viser-app の API に届くようにする
+	"runArgs": ["--add-host=host.docker.internal:host-gateway"],
+	"containerEnv": { "VISER_API_URL": "http://host.docker.internal:8000" },
+
+	// backend（--reload 付き）と frontend を起動（ログは /tmp/backend.log, /tmp/frontend.log）
+	"postStartCommand": "nohup uvicorn backend.main:app --host 0.0.0.0 --port 8100 --reload > /tmp/backend.log 2>&1 & nohup python -m frontend.main > /tmp/frontend.log 2>&1 &",
+
+	"forwardPorts": [8100, 8180],
+
+	"customizations": {
+		"vscode": {
+			"extensions": ["ms-python.python"]
+		}
+	}
+}

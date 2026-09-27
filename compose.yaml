@@ -1,0 +1,21 @@
+# robot-viser-app（backend :8000 / viser :8081）を先に起動しておく前提。ポートは robot-viser-app と重ならないようにずらしている
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8100:8100"
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8180:8180"
+    environment:
+      BACKEND_URL: http://backend:8100
+      # 別の compose で起動した robot-viser-app の API へ、ホスト経由で接続する
+      VISER_API_URL: http://host.docker.internal:8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - backend
+    restart: unless-stopped
