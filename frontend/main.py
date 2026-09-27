@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime
 
@@ -91,11 +92,51 @@ async def index(request: Request):
                     dt = ui.number("周期 dt [s]", value=defaults["dt"], min=0.001, step=0.001, format="%.3f")
                     duration = ui.number("動作時間 [s]", min=0).props("hint=空欄なら制限内で最短").bind_visibility_from(mode, "value", backward=lambda m: m in ("ptp", "lin"))
 
+            # 障害物回避（RMP・経路追従）。障害物は robot-viser-app に登録し、その距離計算を使う（robot-viser-app を COLLISION=1 で起動しておく）
+            # 障害物は robot-viser-app の /obstacles と同じ JSON（座標は base_link 基準 [m]）で書く
+            obstacles_res = await viser_api.get("/obstacles")
+            # 画面の障害物を robot-viser-app に送る。手で書く JSON なので、読めない・形式が違うときは理由を表示して False を返す
+            async def send_obstacles() -> bool:
+                try:
+                    obstacles = json.loads(obstacles_text.value or "[]")
+                except json.JSONDecodeError as e:
+                    ui.notify(f"障害物の JSON が読めません: {e}", type="negative")
+                    return False
+                res = await viser_api.post("/obstacles", json={"obstacles": obstacles})
+                if res.status_code == 422:
+                    ui.notify(f"障害物の形式が違います: {res.json()['detail']}", type="negative", multi_line=True)
+                    return False
+                res.raise_for_status()
+                return True
+            async def send_click():
+                if await send_obstacles(): ui.notify("障害物を robot-viser に送りました")
+            # 試しやすいよう、開始と目標の先端位置の中間に球を置く例を入れる
+            async def example_obstacle():
+                p = [(await client.post("/fk", json={"angles": [n.value for n in inputs]})).json()["position"] for inputs in (start, goal)]
+                obstacles_text.value = json.dumps([{"type": "sphere", "name": "ball", "center": [round((a + b) / 2000, 3) for a, b in zip(*p)], "radius": 0.06}], indent=1)
+            with ui.card().classes("w-full").bind_visibility_from(mode, "value", backward=lambda m: m in ("rmp", "rmp_path")):
+                ui.label("障害物回避").classes("text-lg font-bold")
+                if obstacles_res.status_code == 404:
+                    ui.label("robot-viser-app の衝突判定が無効です（COLLISION=1 docker compose up -d で起動すると使えます）").classes("text-sm text-orange-700")
+                else:
+                    with ui.row().classes("items-center"):
+                        avoid = ui.checkbox("障害物を避ける")
+                        avoid_distance = ui.number("影響距離 [mm]", value=100, min=1).classes("w-32")
+                    obstacles_text = ui.textarea("障害物（JSON。座標は base_link 基準 [m]）", value=json.dumps(obstacles_res.json()["obstacles"], indent=1)).props("rows=6").classes("w-full font-mono text-xs")
+                    with ui.row():
+                        ui.button("viser に送る", on_click=send_click).props("flat no-caps")
+                        ui.button("例を入れる", on_click=example_obstacle).props("flat")
+
             # 生成した軌道をグラフで確認し、robot-viser での再生や CSV 保存に使う
             async def generate():
                 req = {"mode": mode.value, "start": [n.value for n in start], "via": [[n.value for n in v] for v in vias], "goal": [n.value for n in goal], "blend": blend.value, "max_vel": [n.value for n in max_vel],
                        "max_acc": [n.value for n in max_acc], "lin_vel": lin_vel.value, "lin_acc": lin_acc.value, "rot_vel": rot_vel.value, "rot_acc": rot_acc.value,
                        "dt": dt.value, "duration": duration.value}
+                # 障害物を避けるときは、画面の障害物を robot-viser-app に送ってから生成する（表示と計算に使う障害物を揃える）
+                use_avoid = obstacles_res.status_code != 404 and mode.value in ("rmp", "rmp_path") and avoid.value
+                if use_avoid:
+                    if not await send_obstacles(): return
+                    req.update(avoid=True, avoid_distance=avoid_distance.value)
                 # LIN・RMP は逆運動学が解けない経路や目標へ収束しない場合などに生成できないため、理由を表示する（時間がかかる経路もあるのでタイムアウトなし）
                 res = await client.post("/trajectory/csv", json=req, timeout=None)
                 if res.status_code == 422: return ui.notify(res.json()["detail"], type="negative", multi_line=True)
@@ -106,7 +147,8 @@ async def index(request: Request):
                 chart.options["series"] = [{"name": f"J{j}", "type": "line", "showSymbol": False, "data": [[r[0], r[j]] for r in rows]} for j in range(1, 7)]
                 chart.update()
                 chart.set_visibility(True)
-                ui.notify(f"{len(rows)}点 / {rows[-1][0]:.2f}秒の軌道を生成しました")
+                clearance = f"、障害物との最小距離 {res.headers['X-Min-Distance']} mm" if "X-Min-Distance" in res.headers else ""
+                ui.notify(f"{len(rows)}点 / {rows[-1][0]:.2f}秒の軌道を生成しました{clearance}")
 
             # robot-viser に CSV ファイルとして送って再生させる（シーク・停止は viser 画面の Time スライダーと Play/Stop で行う）
             async def play():

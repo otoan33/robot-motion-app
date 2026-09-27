@@ -38,17 +38,21 @@ class TrajectoryRequest(BaseModel):
     dt: float = Field(DEFAULTS["dt"], gt=0)
     duration: float | None = None
     blend: float = Field(50.0, ge=0)
+    # rmp・rmp_path で、robot-viser-app に登録した障害物を避ける RMP を合成する。avoid_distance は回避を効かせ始める距離 [mm]
+    avoid: bool = False
+    avoid_distance: float = Field(100.0, gt=0)
 
 
-# 生成条件から軌道（時刻 [s] と6関節角度 [deg] の列）を作る
-def generate(req: TrajectoryRequest) -> tuple[list[float], list[list[float]]]:
+# 生成条件から軌道（時刻 [s] と6関節角度 [deg] の列）と、障害物との最小距離 [mm]（障害物回避したときのみ。それ以外は None）を作る
+def generate(req: TrajectoryRequest) -> tuple[list[float], list[list[float]], float | None]:
+    avoid = req.avoid_distance if req.avoid else None
     if req.mode == "lin":
-        return plan_lin(req.start, req.goal, req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.dt, req.duration)
+        return *plan_lin(req.start, req.goal, req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.dt, req.duration), None
     if req.mode == "rmp":
-        return plan_rmp(req.start, req.goal, req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.dt)
+        return plan_rmp(req.start, req.goal, req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.dt, avoid)
     if req.mode == "rmp_path":
-        return plan_rmp_path(req.start, req.via, req.goal, req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.blend, req.dt)
-    return plan_ptp(req.start, req.goal, req.max_vel, req.max_acc, req.dt, req.duration)
+        return plan_rmp_path(req.start, req.via, req.goal, req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.blend, req.dt, avoid)
+    return *plan_ptp(req.start, req.goal, req.max_vel, req.max_acc, req.dt, req.duration), None
 
 
 # 選べる動作モードと既定の設定を返す
@@ -71,13 +75,14 @@ def post_fk(req: AnglesRequest):
 # 軌道を生成して JSON で返す
 @app.post("/trajectory")
 def post_trajectory(req: TrajectoryRequest):
-    times, angles = generate(req)
-    return {"times": times, "angles": angles, "duration_sec": times[-1], "num_points": len(times)}
+    times, angles, min_distance = generate(req)
+    return {"times": times, "angles": angles, "duration_sec": times[-1], "num_points": len(times), "min_distance": min_distance}
 
 
-# 軌道を生成し、robot-viser-app がそのまま読める t 形式の CSV（t[sec], joint1..joint6[deg]）で返す
+# 軌道を生成し、robot-viser-app がそのまま読める t 形式の CSV（t[sec], joint1..joint6[deg]）で返す。障害物との最小距離 [mm] はヘッダ X-Min-Distance で返す
 @app.post("/trajectory/csv", response_class=PlainTextResponse)
 def post_trajectory_csv(req: TrajectoryRequest):
-    times, angles = generate(req)
+    times, angles, min_distance = generate(req)
     rows = [f"{t:.4f}," + ",".join(f"{a:.6f}" for a in q) for t, q in zip(times, angles)]
-    return "\n".join(["t," + ",".join(f"joint{i}" for i in range(1, 7)), *rows]) + "\n"
+    csv = "\n".join(["t," + ",".join(f"joint{i}" for i in range(1, 7)), *rows]) + "\n"
+    return PlainTextResponse(csv, headers={} if min_distance is None else {"X-Min-Distance": f"{min_distance:.1f}"})

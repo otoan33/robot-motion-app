@@ -1,6 +1,6 @@
 # robot-motion-app
 
-robot-viser-app で再生する「時系列の関節角度軌道」を生成するアプリ。フロントエンドを NiceGUI、バックエンドを FastAPI で作り、構成は robot-viser-app に合わせている。動作モードは台形速度の **PTP（関節補間）**・**LIN（先端の直線補間）** と、RMP（Riemannian Motion Policies）による **目標到達 PTP**・**経由点の折れ線に沿う経路追従**。
+robot-viser-app で再生する「時系列の関節角度軌道」を生成するアプリ。フロントエンドを NiceGUI、バックエンドを FastAPI で作り、構成は robot-viser-app に合わせている。動作モードは台形速度の **PTP（関節補間）**・**LIN（先端の直線補間）** と、RMP（Riemannian Motion Policies）による **目標到達 PTP**・**経由点の折れ線に沿う経路追従**。RMP の 2 つは、robot-viser-app の距離計算を使った **障害物回避** と合成できる。
 
 ## 構成
 
@@ -14,6 +14,7 @@ robot-motion-app/
 │   ├── planner.py            # 軌道生成（台形速度の PTP・LIN）
 │   ├── rmp.py                # 軌道生成（RMP の目標到達 PTP・経路追従）
 │   ├── path.py               # 経路追従の経路（経由点の折れ線・角の丸め・速度プロファイル）
+│   ├── obstacles.py          # robot-viser-app の距離計算 API（/distances）の呼び出し
 │   ├── kinematics.py         # URDF からの順運動学・逆運動学
 │   ├── assets/arms/robotA/arm.urdf  # robot-viser-app と同じアームの URDF（関節の位置・回転軸だけを使う）
 │   ├── requirements.txt
@@ -32,7 +33,7 @@ robot-motion-app/
    └── iframe ──> robot-viser-app viser (:8081)                                      … 3D 表示
 ```
 
-backend は軌道の生成だけを行い、viser には依存しない。robot-viser-app への姿勢・軌道の送信は frontend が行う。
+backend は軌道の生成だけを行い、viser には依存しない。robot-viser-app への姿勢・軌道・障害物の送信は frontend が行う。障害物回避を使うときだけ、backend が robot-viser-app の距離計算 API（`/distances`）を呼ぶ（robot-viser-app を `COLLISION=1` で起動しておく）。
 robot-viser-app と同時に動かすため、ポートはずらしている。
 
 | | robot-viser-app | robot-motion-app |
@@ -46,7 +47,7 @@ frontend の接続先は環境変数で変えられる。
 | 環境変数 | 既定値 | 用途 |
 |---|---|---|
 | `BACKEND_URL` | `http://127.0.0.1:8100` | 軌道生成 API |
-| `VISER_API_URL` | `http://127.0.0.1:8000` | robot-viser-app の API（`/joints`, `/trajectory/upload`） |
+| `VISER_API_URL` | `http://127.0.0.1:8000` | robot-viser-app の API（frontend: `/joints`, `/trajectory/upload`, `/obstacles`、backend: `/distances`） |
 | `VISER_URL` | `http://{画面を開いたホスト名}:8081` | iframe で表示する viser 画面（ブラウザから直接つなぐ） |
 
 ## 実行する
@@ -60,7 +61,9 @@ docker compose up -d --build
 - 画面: http://localhost:8180
 - API: http://localhost:8100（ドキュメント: http://localhost:8100/docs）
 
-compose では frontend に `VISER_API_URL=http://host.docker.internal:8000` を渡し、別の compose で動いている robot-viser-app の API へホスト経由で接続する。
+compose では frontend と backend に `VISER_API_URL=http://host.docker.internal:8000` を渡し、別の compose で動いている robot-viser-app の API へホスト経由で接続する。
+
+障害物回避を使う場合は、robot-viser-app を衝突判定ありで起動しておく（robot-viser-app で `COLLISION=1 docker compose up -d`）。
 
 Dev Container で開いた場合は、backend（`--reload` 付き）と frontend が自動で起動する（ログは `/tmp/backend.log`, `/tmp/frontend.log`）。
 
@@ -72,7 +75,8 @@ Dev Container で開いた場合は、backend（`--reload` 付き）と frontend
 | 経由点 | 経路追従のとき、開始と目標の間に経由点（関節角度）を追加・削除できる。追加時の初期値は開始と目標の中間 |
 | 開始位置 / 目標位置 | J1〜J6 [deg]。その姿勢での先端（tool0）の位置 [mm]・姿勢 RPY [deg] を下に表示する。「表示」で robot-viser にその姿勢を表示する。「開始⇄目標」で入れ替える（経由点は順番を逆にする） |
 | 制限 | 関節ごとの最大速度 [deg/s]・最大加速度 [deg/s²]、LIN・RMP・経路追従のときは先端の速度 [mm/s]・加速度 [mm/s²]・姿勢の角速度 [deg/s]・角加速度 [deg/s²]、経路追従の角の丸め [mm]、周期 dt [s]、動作時間 [s]（PTP・LIN のみ。空欄なら制限内で最短） |
-| 生成 | 軌道を生成し、関節角度の時系列グラフを表示する。生成できないとき（LIN で関節の形態が違うなど）は理由を表示する |
+| 障害物回避 | RMP・経路追従のとき。「障害物を避ける」と影響距離 [mm]、障害物の JSON（robot-viser-app の `/obstacles` と同じ形式、座標は base_link 基準 [m]）。「viser に送る」で robot-viser に表示、「例を入れる」で開始と目標の先端位置の中間に球を置く。robot-viser-app の衝突判定が無効なときは案内だけを表示する |
+| 生成 | 軌道を生成し、関節角度の時系列グラフを表示する。障害物を避けるときは、画面の障害物を robot-viser に送ってから生成し、障害物との最小距離も表示する。生成できないとき（LIN で関節の形態が違うなど）は理由を表示する |
 | 再生 | 生成した軌道を robot-viser に送って再生する（シーク・停止は viser 画面の Time スライダーと Play/Stop） |
 | CSV 保存 | 生成した軌道を CSV でダウンロードする |
 
@@ -114,7 +118,7 @@ RMPflow の形で、いくつかの空間に置いたポリシー（RMP）を関
 - 関節の加速度・速度が上限を超えるときは、向きを保ったまま全体を縮める
 - 先端は目標へほぼ直線的に寄っていく（関節・姿勢の RMP との合成のため厳密な直線ではない）。目標へは漸近的に近づくため、関節の誤差と速度がともに 0.01 以下（deg, deg/s）になった時点で終え、最後の点を目標ちょうどにする。動作時間はこの到達までの時間になる
 - 60 秒以内に収束しない場合は 422 で理由を返す（手首の反転など、先端では目標に着いても関節の形態が違って止まってしまう場合）
-- 障害物回避などのポリシーは、`backend/rmp.py` の `step` に渡す RMP の列（ヤコビアン, 加速度, 計量）に足せば組み込める（robot-viser-app の `/distances` が返す制御点のヤコビアンと距離を使う想定）
+- 目標の手前で 0.5 秒止まったままなら 422 を返す（障害物による局所解、手首の反転など関節の形態の違い）
 
 ### 経路追従（RMP・経由点の折れ線）
 
@@ -131,8 +135,27 @@ RMPflow の形で、いくつかの空間に置いたポリシー（RMP）を関
   - 横ずれ（接線方向を除いたずれ）と姿勢のずれは、`ω_end` で収まる硬い臨界減衰（`β = 2ω_end`、ソフト正規化で戻す加速度は最大加速度まで）で戻す。姿勢は経路に沿った角速度と、実際の進み方の加速度から求めた角加速度を先回りで与える
   - 計量は位置の横ずれ方向を強く、接線方向を弱くする（障害物回避などと合成したとき、横ずれを優先して抑えつつ進みを譲る）。関節には特異点付近の安定用のごく弱い正則化だけを置く
   - 終点では、残りのずれ全体を同じ硬さで戻して止める。位置 0.01 mm・姿勢 1e-4 rad・関節速度 0.01 deg/s 以内で終え、最後の点を目標ちょうどにする
-- 生成できない場合は 422 で理由を返す（終点で止まった関節の形態が目標と違う、120 秒以内に終点へ収束しない）
+- 生成できない場合は 422 で理由を返す（終点で止まった関節の形態が目標と違う、終点の手前で 0.5 秒止まったまま、120 秒以内に終点へ収束しない）
 - 既定の設定（250 mm/s・1000 mm/s²）では、経路からのずれは位置 0.1 mm・姿勢 0.1° 以下、終点での行き過ぎはなし。速度プロファイルは関節の上限を考えていないため、先端の速度・加速度を大きくして関節の加速度が頭打ちになると、経路から大きくずれることがある
+
+### 障害物回避（RMP・経路追従と合成）
+
+robot-viser-app に登録した障害物（球・直方体・カプセル）と、ロボット（アーム＋ハンド）の近似球との距離を robot-viser-app の `/distances` で求め、RMPflow の衝突回避 RMP にならったポリシーを目標到達・経路追従の RMP と合成する（`backend/rmp.py` の `Avoidance`）。
+
+- 近似球と障害物の組のうち、距離 d が影響距離 r 以内のものごとに、距離の空間（1 次元、ヤコビアンは「障害物から離れる向き × 球中心のヤコビアン」）に RMP を置く。`z = r/d − 1`（r で 0、近いほど大きい）として
+  - 加速度 `a = κ·a_max·z² + β·max(−ḋ, 0)·(z + 1)`（κ = 0.1、a_max は先端の最大加速度、β は先端の β）。押し返しは弱く、主に近づく速さを近いほど強くブレーキする
+  - 計量 `m = w·z²·u(ḋ)`（w = 10）。`u = ε + (1−ε)(1 − exp(−min(ḋ,0)²/2σ²))`（ε = 0.05、σ = 0.05 m/s）で、近づいているときだけ大きくする。近づいていなければ他の RMP をほとんど邪魔しないので、障害物に沿って滑るように避ける
+- `/distances` は dt ごとに問い合わせ、その間の細かい刻みでは距離をヤコビアンで線形に進める（1 回数 ms のため、10 秒の動作で生成に 10 秒ほどかかる）
+- 距離が負（めり込み）になった時点で 422 を返す（開始姿勢で既にめり込んでいる場合も含む）。生成できたときは軌道全体での最小距離を返す（`/trajectory` の `min_distance`、`/trajectory/csv` のヘッダ `X-Min-Distance`、単位 mm）
+- 試した結果（開始 `[0,-20,30,0,40,0]` → 目標 `[40,-10,20,0,60,30]`、先端の直線上に障害物、影響距離 100 mm）
+  | 障害物 | 回避なし（目標到達 RMP） | 回避あり（目標到達 RMP） | 回避あり（経路追従、直線） |
+  |---|---|---|---|
+  | 球 半径 60 mm（直線上） | −79 mm（めり込む） | 最小 35 mm、9.6 秒で目標へ | 手前で止まる（経路が障害物を通る） |
+  | 直方体 100 mm（直線上） | −116 mm | 最小 34 mm、9.1 秒 | 手前で止まる |
+  | 柱（カプセル） | −105 mm | 最小 31 mm、10.4 秒 | 手前で止まる |
+  | 球（直線の 22 mm 横を通る） | 22 mm | 最小 53 mm、7.2 秒 | 最小 31 mm、5.0 秒（経路から 10 mm 逃げて戻る） |
+  | 壁 400×400 mm（行く手をふさぐ） | − | 手前で止まる（局所解） | 手前で止まる |
+- 目標到達 RMP は障害物を回り込んで目標へ着く。経路追従は経路の近くの障害物なら少し逃げて経路へ戻るが、経路が障害物を通り抜ける場合は止まる（経路の形を守るポリシーのため）。どちらも局所的なポリシーなので、行く手をふさぐ大きな障害物は越えられない（経由点を足すなどで経路を与える）
 
 ## API
 
@@ -163,7 +186,7 @@ RMPflow の形で、いくつかの空間に置いたポリシー（RMP）を関
 }
 ```
 
-`mode` は `"ptp"`・`"lin"`・`"rmp"`・`"rmp_path"`。`lin_vel`・`lin_acc`（先端 [mm/s]・[mm/s²]）と `rot_vel`・`rot_acc`（姿勢 [deg/s]・[deg/s²]）は LIN・RMP・経路追従で使い、`duration` は PTP・LIN だけで使う。`via`（経由点の関節角度 [deg] の列）と `blend`（角の丸め [mm]、既定 50）は経路追従だけで使う。`mode` 以外の制限・`dt`・`duration` は省略できる（既定値は `/modes` の値、`duration` は最短）。
+`mode` は `"ptp"`・`"lin"`・`"rmp"`・`"rmp_path"`。`lin_vel`・`lin_acc`（先端 [mm/s]・[mm/s²]）と `rot_vel`・`rot_acc`（姿勢 [deg/s]・[deg/s²]）は LIN・RMP・経路追従で使い、`duration` は PTP・LIN だけで使う。`via`（経由点の関節角度 [deg] の列）と `blend`（角の丸め [mm]、既定 50）は経路追従だけで使う。`avoid`（true で障害物回避、既定 false）と `avoid_distance`（影響距離 [mm]、既定 100）は RMP・経路追従で使う。`mode` 以外の制限・`dt`・`duration` は省略できる（既定値は `/modes` の値、`duration` は最短）。
 
 ```bash
 curl -X POST http://localhost:8100/trajectory/csv -H 'Content-Type: application/json' \

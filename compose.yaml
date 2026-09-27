@@ -4,6 +4,11 @@ services:
     build: ./backend
     ports:
       - "8100:8100"
+    environment:
+      # 障害物回避で robot-viser-app の距離計算 API（/distances）を使う
+      VISER_API_URL: http://host.docker.internal:8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   frontend:
