@@ -1,6 +1,6 @@
 # robot-motion-app
 
-robot-viser-app で再生する「時系列の関節角度軌道」を生成するアプリ。フロントエンドを NiceGUI、バックエンドを FastAPI で作り、構成は robot-viser-app に合わせている。動作モードは台形速度の **PTP（関節補間）**・**LIN（先端の直線補間）** と、RMP（Riemannian Motion Policies）による **目標到達 PTP**・**経由点の折れ線に沿う経路追従**。RMP の 2 つは、robot-viser-app の距離計算を使った **障害物回避** と合成できる。
+robot-viser-app で再生する「時系列の関節角度軌道」を生成するアプリ。フロントエンドを NiceGUI、バックエンドを FastAPI で作り、構成は robot-viser-app に合わせている。動作モードは台形速度の **PTP（関節補間）**・**LIN（先端の直線補間）** と、RMP（Riemannian Motion Policies）による **目標到達 PTP**・**経由点の折れ線に沿う経路追従**。RMP の 2 つは、robot-viser-app の距離計算を使った **障害物回避** と合成できる。ほかに、レーザートラッカーでのキャリブレーション用に、干渉も光路の遮蔽もない測定点を広く選んで PTP でつなぐ **測定動作** を作れる。
 
 ## 構成
 
@@ -13,8 +13,9 @@ robot-motion-app/
 │   ├── main.py               # API 定義（/modes, /fk, /trajectory, /trajectory/csv）
 │   ├── planner.py            # 軌道生成（台形速度の PTP・LIN）
 │   ├── rmp.py                # 軌道生成（RMP の目標到達 PTP・経路追従）
+│   ├── calib.py              # レーザートラッカー校正の測定動作（測定点の選択・順序・経由点）
 │   ├── path.py               # 経路追従の経路（経由点の折れ線・角の丸め・速度プロファイル）
-│   ├── obstacles.py          # robot-viser-app の距離計算 API（/distances）の呼び出し
+│   ├── obstacles.py          # robot-viser-app の距離計算 API（/distances）・障害物（/obstacles）の呼び出し
 │   ├── kinematics.py         # URDF からの順運動学・逆運動学
 │   ├── assets/arms/robotA/arm.urdf  # robot-viser-app と同じアームの URDF（関節の位置・回転軸だけを使う）
 │   ├── requirements.txt
@@ -39,7 +40,7 @@ robot-motion-app/
    └── iframe ──> robot-viser-app viser (:8081)                                      … 3D 表示
 ```
 
-backend は軌道の生成だけを行い、viser には依存しない。robot-viser-app への姿勢・軌道・障害物の送信は frontend が行う。障害物回避を使うときだけ、backend が robot-viser-app の距離計算 API（`/distances`）を呼ぶ（robot-viser-app を `COLLISION=1` で起動しておく）。
+backend は軌道の生成だけを行い、viser には依存しない。robot-viser-app への姿勢・軌道・障害物の送信は frontend が行う。障害物回避と測定動作の生成のときだけ、backend が robot-viser-app の距離計算 API（`/distances`）と障害物（`/obstacles`）を呼ぶ（robot-viser-app を `COLLISION=1` で起動しておく）。
 robot-viser-app と同時に動かすため、ポートはずらしている。
 
 | | robot-viser-app | robot-motion-app |
@@ -69,7 +70,7 @@ docker compose up -d --build
 
 compose では frontend と backend に `VISER_API_URL=http://host.docker.internal:8000` を渡し、別の compose で動いている robot-viser-app の API へホスト経由で接続する。
 
-障害物回避を使う場合は、robot-viser-app を衝突判定ありで起動しておく（robot-viser-app で `COLLISION=1 docker compose up -d`）。
+障害物回避・測定動作を使う場合は、robot-viser-app を衝突判定ありで起動しておく（robot-viser-app で `COLLISION=1 docker compose up -d`）。
 
 Dev Container で開いた場合は、backend（`--reload` 付き）と frontend が自動で起動する（ログは `/tmp/backend.log`, `/tmp/frontend.log`）。
 
@@ -77,14 +78,15 @@ Dev Container で開いた場合は、backend（`--reload` 付き）と frontend
 
 | 項目 | 内容 |
 |---|---|
-| 動作モード | PTP（関節補間）/ LIN（先端の直線補間）/ PTP（RMP 目標到達ポリシー）/ 経路追従（RMP・経由点の折れ線） |
+| 動作モード | PTP（関節補間）/ LIN（先端の直線補間）/ PTP（RMP 目標到達ポリシー）/ 経路追従（RMP・経由点の折れ線）/ 測定動作（レーザートラッカー校正。開始・目標は使わず、全軸 0° から始まり 0° に戻る） |
 | 経由点 | 経路追従のとき、開始と目標の間に経由点（関節角度）を追加・削除できる。追加時の初期値は開始と目標の中間 |
 | 開始位置 / 目標位置 | J1〜J6 [deg]。その姿勢での先端（tool0）の位置 [mm]・姿勢 RPY [deg] を下に表示する。「表示」で robot-viser にその姿勢を表示する。「開始⇄目標」で入れ替える（経由点は順番を逆にする） |
 | 制限 | 関節ごとの最大速度 [deg/s]・最大加速度 [deg/s²]、LIN・RMP・経路追従のときは先端の速度 [mm/s]・加速度 [mm/s²]・姿勢の角速度 [deg/s]・角加速度 [deg/s²]、経路追従の角の丸め [mm]、周期 dt [s]、動作時間 [s]（PTP・LIN のみ。空欄なら制限内で最短） |
-| 障害物回避 | RMP・経路追従のとき。「障害物を避ける」と影響距離 [mm]、障害物の JSON（robot-viser-app の `/obstacles` と同じ形式、座標は base_link 基準 [m]）。「viser に送る」で robot-viser に表示、「例を入れる」で開始と目標の先端位置の中間に球を置く。robot-viser-app の衝突判定が無効なときは案内だけを表示する |
-| 生成 | 軌道を生成し、関節角度の時系列グラフを表示する。障害物を避けるときは、画面の障害物を robot-viser に送ってから生成し、障害物との最小距離も表示する。生成できないとき（LIN で関節の形態が違うなど）は理由を表示する |
+| 測定動作 | 測定動作のとき。測定点数、許容角 [deg]（ミラーの向きとトラッカー方向のなす角）、安全距離 [mm]（障害物との距離）、トラッカーの位置 [mm]（base_link 基準）、ターゲット（SMR）の位置とミラーの向き（tool0 座標）、測定点を置くエリア（任意。ターゲット位置の範囲 [mm]）、可動範囲 [deg]（既定は URDF の limit） |
+| 障害物回避 | RMP・経路追従・測定動作のとき（測定動作では干渉チェックにだけ使い、「障害物を避ける」は出さない）。「障害物を避ける」と影響距離 [mm]、障害物の JSON（robot-viser-app の `/obstacles` と同じ形式、座標は base_link 基準 [m]）。「viser に送る」で robot-viser に表示、「例を入れる」で開始と目標の先端位置の中間に球を置く。robot-viser-app の衝突判定が無効なときは案内だけを表示する |
+| 生成 | 軌道を生成し、関節角度の時系列グラフを表示する。障害物を避けるときは、画面の障害物を robot-viser に送ってから生成し、障害物との最小距離も表示する。生成できないとき（LIN で関節の形態が違うなど）は理由を表示する。測定動作では、画面の障害物を robot-viser に送ってから生成し、トラッカー（青い球）・測定点（赤）・経由点（灰）・エリア（緑の半透明の箱）を robot-viser の補助図形で描く |
 | 再生 | 生成した軌道を robot-viser に送って再生する（シーク・停止は viser 画面の Time スライダーと Play/Stop） |
-| CSV 保存 | 生成した軌道を CSV でダウンロードする |
+| CSV 保存 | 生成した軌道を CSV でダウンロードする。測定動作では、全ポイントの関節角度の CSV（下記「測定動作の CSV」）を保存する（再生は PTP でつないだ軌道で行う） |
 
 ## 軌道生成
 
@@ -163,6 +165,24 @@ robot-viser-app に登録した障害物（球・直方体・カプセル）と�
   | 壁 400×400 mm（行く手をふさぐ） | − | 手前で止まる（局所解） | 手前で止まる |
 - 目標到達 RMP は障害物を回り込んで目標へ着く。経路追従は経路の近くの障害物なら少し逃げて経路へ戻るが、経路が障害物を通り抜ける場合は止まる（経路の形を守るポリシーのため）。どちらも局所的なポリシーなので、行く手をふさぐ大きな障害物は越えられない（経由点を足すなどで経路を与える）
 
+### 測定動作（レーザートラッカー校正）
+
+レーザートラッカーでロボットのキャリブレーションをするための測定点を選び、全軸 0° から PTP でつないで 0° に戻る動作を作る（`backend/calib.py`）。干渉チェックには robot-viser-app の近似球と障害物を使うので、robot-viser-app を `COLLISION=1` で起動しておく。長さは内部で m・角度は rad、入出力は mm・deg。
+
+- 干渉チェック（手元で高速に計算する）
+  - 近似球は robot-viser-app の `/distances` から全軸 0° の中心を 1 回だけ取り、中心が動く最後の関節のリンク座標に直して、順運動学で動かす。障害物は `/obstacles` から取り、形状ごとの符号付き距離を計算する
+  - 障害物: 近似球と障害物の距離が安全距離以上。根元に固定された球（床に接する台座など）は動かして避けられないので見ない
+  - 自己干渉: リンクの並びで 2 つ以上離れ、全軸 0° で重なっていない球の組が重ならない
+  - PTP の区間: 関節 i の回転で球の中心が動く量の上限（腕の長さ × 回転角）から、s（0→1）あたりに距離が縮みうる最大量を求め、隣り合う点の余裕だけでは干渉しないと言い切れない間だけ二分して調べ直す（区間全体で干渉しないことが保証される）
+- 測定点の候補
+  - 可動範囲内のランダムな関節角度を 500 姿勢ずつ作り、干渉する姿勢とエリア外の姿勢を捨てる
+  - 残りは、ターゲットの位置を保ったまま、ミラーの向きとトラッカー方向のなす角が許容角に収まるよう逆運動学（減衰最小二乗法、まとめて解く）で向きを直す。ミラーの軸まわりは拘束せず、許容角を超えたぶんだけ回すので、元の姿勢に近い解になる
+  - 可動範囲・許容角・干渉・光路（トラッカーからターゲットまで 10 mm 間隔の点が、障害物と、ターゲットを含まない近似球に入らない）をすべて満たすものを、点数の 5 倍まで集める
+- 測定点の選択: 候補のターゲット位置から、互いに最も離れるよう点数ぶんを選ぶ（最遠点サンプリング）。全軸 0° から PTP で直接行ける点だけにする（どの 2 点の間も、全軸 0° を経由すれば必ず干渉せずにつなげる）。足りなければ 422 で理由を返す
+- 順序: PTP の動作時間（台形速度の最短時間。最も遅い関節で決まる）をコストに、全軸 0° を始点・終点とする巡回を最近傍法で作り、2-opt で直す。並べた順で、各測定点を前後の点に近い姿勢（ミラーの軸まわり・許容角内の傾きを変えたもの）に解き直して動作量を減らし、並べ直す（2 回）
+- 経由点: 並べた順に PTP でつなぎ、干渉する区間には経由点を入れる。干渉しない姿勢（候補探しの途中のもの・測定点の候補・全軸 0°）を節点に、動作時間の近い 15 個どうしを辺で結んだ経路網をつくり、動作時間の合計が最短の経路の辺を順に調べて干渉する辺を外しては探し直す（lazy PRM）。見つからなければ全軸 0° を経由する
+- 試した結果（トラッカー `[0, 2500, 800]`、許容角 30°、安全距離 10 mm、床と台の障害物）: 100 点で生成 14 秒、合計動作時間 58 秒、経由点 3 点。軌道全体で、robot-viser-app の `/distances` で求めた障害物との最小距離 12 mm（根元の球を除く）、自己干渉なし、全測定点で許容角以内・光路の遮蔽なし
+
 ## 使い方マニュアル
 
 `docs/manual/` に、画面の操作手順をスクリーンショット付きでまとめたマニュアル（Marp のスライド、全 24 枚）がある。PDF（`manual.pdf`）は画像を埋め込んでいるので 1 ファイルで配れる。HTML（`manual.html`）は `img/` を読むので、`docs/manual/` フォルダごと渡す。
@@ -216,6 +236,7 @@ docker run --rm --network host -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/wo
 | POST | `/fk` | 関節角度 `{"angles": [6]}` [deg] での先端の位置 [mm] と姿勢 RPY [deg] |
 | POST | `/trajectory` | 軌道を生成して JSON（`times`, `angles`, `duration_sec`, `num_points`）で返す |
 | POST | `/trajectory/csv` | 軌道を生成して CSV テキストで返す |
+| POST | `/calib` | 測定動作を生成して JSON（`points`, `points_csv`, `trajectory_csv`, `duration_sec`, `num_measure`, `num_via`）で返す |
 
 リクエスト（`/trajectory`, `/trajectory/csv` 共通）:
 
@@ -244,6 +265,29 @@ curl -X POST http://localhost:8100/trajectory/csv -H 'Content-Type: application/
   -d '{"start":[0,0,0,0,0,0],"goal":[30,-30,30,0,45,0]}' > ptp.csv
 ```
 
+`/calib` のリクエスト（すべて省略できる。長さは mm・base_link 基準、角度は deg）:
+
+```json
+{
+  "num_points": 100,
+  "tracker": [0, 2500, 800],
+  "target_offset": [0, 0, 0],
+  "target_dir": [0, 0, 1],
+  "cone": 30,
+  "area_min": null,
+  "area_max": null,
+  "joint_min": [-179.9, -179.9, -179.9, -179.9, -179.9, -179.9],
+  "joint_max": [179.9, 179.9, 179.9, 179.9, 179.9, 179.9],
+  "margin": 10,
+  "max_vel": [180, 180, 180, 180, 180, 180],
+  "max_acc": [720, 720, 720, 720, 720, 720],
+  "dt": 0.01,
+  "seed": 0
+}
+```
+
+`target_offset`・`target_dir` はターゲット（SMR）の tool0 座標での位置と、ミラーが向く方向。`cone` はミラーの向きとトラッカー方向のなす角の許容値。`area_min`・`area_max` を両方指定すると、ターゲット位置をその箱の中に限る。`margin` は障害物との安全距離。`joint_min`・`joint_max` の既定値は URDF の limit。`seed` を変えると別の測定点になる。`points` は全ポイント（`label`: `start`・`measure`・`via`・`end`、`angles` [deg]、ターゲット位置 `position` [mm]）、`trajectory_csv` はそれを PTP（各点で停止）でつないだ再生用の軌道（下記の t 形式）。
+
 ### CSV 形式
 
 robot-viser-app がそのまま読める「t 形式」。
@@ -256,3 +300,14 @@ t,joint1,joint2,joint3,joint4,joint5,joint6
 ```
 
 `t` は秒、`joint1`〜`joint6` は度。
+
+### 測定動作の CSV
+
+`/calib` の `points_csv`（画面の「CSV 保存」）は、全ポイントの関節角度 [deg] を順に並べたもの。`label` は `start`（全軸 0°）・`measure`（測定点）・`via`（干渉を避ける経由点）・`end`（全軸 0° に戻る）。
+
+```
+no,label,joint1,joint2,joint3,joint4,joint5,joint6
+0,start,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000
+1,measure,40.562011,-54.731056,39.474575,-55.082728,62.268403,6.321836
+...
+```

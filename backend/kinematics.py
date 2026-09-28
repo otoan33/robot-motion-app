@@ -31,15 +31,16 @@ def matrix_rpy(R: np.ndarray) -> np.ndarray:
 
 
 class Arm:
-    # 関節を定義順（根元→先端の一本鎖）に読み、各関節の取り付け位置・姿勢と回転軸（固定関節は None）を持つ
+    # 関節を定義順（根元→先端の一本鎖）に読み、各関節の取り付け位置・姿勢と回転軸（固定関節は None）を持つ。可動範囲 limits は [下限, 上限] [deg] の組
     def __init__(self, path: Path = ARM_URDF):
-        self.joints = []
+        self.joints, self.limits = [], []
         for j in ET.parse(path).getroot().iter("joint"):
             o = j.find("origin")
             F = np.eye(4)
             F[:3, :3], F[:3, 3] = rpy_matrix([float(v) for v in o.get("rpy", "0 0 0").split()]), [float(v) for v in o.get("xyz", "0 0 0").split()]
             axis = np.array([float(v) for v in j.find("axis").get("xyz").split()]) if j.get("type") == "revolute" else None
             self.joints.append((F, axis))
+            if axis is not None: self.limits.append([float(np.degrees(float(j.find("limit").get(k)))) for k in ("lower", "upper")])
 
     # 関節角度 q[rad] での先端（tool0）の 4x4 変換と、ヤコビアン用の各可動関節の位置・回転軸（ワールド座標）
     def forward(self, q) -> tuple[np.ndarray, list]:
@@ -51,6 +52,28 @@ class Arm:
                 T[:3, :3] = T[:3, :3] @ rotation(axis, q[i])
                 i += 1
         return T, axes
+
+    # forward を多くの関節角度 q (K,6)[rad] でまとめて計算する（干渉チェックで多くの姿勢を一度に調べる用）。先端の変換 (K,4,4) と、根元と各可動関節より先のリンクの座標系 (K,7,4,4)（frames[:, 0] が根元、frames[:, i] が関節 i の先）
+    def forward_many(self, q) -> tuple[np.ndarray, np.ndarray]:
+        T, i = np.broadcast_to(np.eye(4), (len(q), 4, 4)), 0
+        frames = [T]
+        for F, axis in self.joints:
+            T = T @ F
+            if axis is not None:
+                # ロドリゲスの公式を姿勢ごとにまとめて計算する
+                K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+                T[:, :3, :3] = T[:, :3, :3] @ (np.eye(3) + np.sin(q[:, i])[:, None, None] * K + (1 - np.cos(q[:, i]))[:, None, None] * K @ K)
+                frames.append(T)
+                i += 1
+        return T, np.stack(frames, 1)
+
+    # jacobian を多くの関節角度 q (K,6)[rad] でまとめて計算する。先端の変換 (K,4,4) と幾何ヤコビアン (K,6,6)
+    def jacobian_many(self, q) -> tuple[np.ndarray, np.ndarray]:
+        T, frames = self.forward_many(q)
+        # 各関節の回転軸・位置（ワールド座標）を列に並べる (K,3,6)
+        A = np.stack([frames[:, i + 1, :3, :3] @ axis for i, axis in enumerate(a for _, a in self.joints if a is not None)], 2)
+        O = frames[:, 1:, :3, 3].transpose(0, 2, 1)
+        return T, np.concatenate([np.cross(A, T[:, :3, 3, None] - O, axis=1), A], 1)
 
     # 先端の 4x4 変換と幾何ヤコビアン（6x6。上3行が並進速度、下3行が角速度。各列: 回転軸 × 関節から先端へのベクトル、回転軸）
     def jacobian(self, q) -> tuple[np.ndarray, np.ndarray]:
