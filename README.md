@@ -24,8 +24,11 @@ robot-motion-app/
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── scripts/
-│   └── make_videos.py        # ポリシーごとのサンプル動画を robot-viser-app で録画して作る
-└── docs/videos/              # サンプル動画（ポリシーごとに 1 本）
+│   ├── make_videos.py        # ポリシーごとのサンプル動画を robot-viser-app で録画して作る
+│   └── make_manual.py        # 使い方マニュアルのスクリーンショットを撮る
+└── docs/
+    ├── videos/               # サンプル動画（ポリシーごとに 1 本）
+    └── manual/               # 使い方マニュアル（manual.md・html・pdf と img/）
 ```
 
 ### 通信の流れ
@@ -159,6 +162,26 @@ robot-viser-app に登録した障害物（球・直方体・カプセル）と�
   | 球（直線の 22 mm 横を通る） | 22 mm | 最小 53 mm、7.2 秒 | 最小 31 mm、5.0 秒（経路から 10 mm 逃げて戻る） |
   | 壁 400×400 mm（行く手をふさぐ） | − | 手前で止まる（局所解） | 手前で止まる |
 - 目標到達 RMP は障害物を回り込んで目標へ着く。経路追従は経路の近くの障害物なら少し逃げて経路へ戻るが、経路が障害物を通り抜ける場合は止まる（経路の形を守るポリシーのため）。どちらも局所的なポリシーなので、行く手をふさぐ大きな障害物は越えられない（経由点を足すなどで経路を与える）
+
+## 使い方マニュアル
+
+`docs/manual/` に、画面の操作手順をスクリーンショット付きでまとめたマニュアル（Marp のスライド、全 24 枚）がある。PDF（`manual.pdf`）は画像を埋め込んでいるので 1 ファイルで配れる。HTML（`manual.html`）は `img/` を読むので、`docs/manual/` フォルダごと渡す。
+
+画面を改修したら、robot-motion-app と衝突判定ありの robot-viser-app を起動した状態で、プロジェクト直下からスクリーンショットを撮り直す（撮影中は robot-viser の姿勢・障害物・軌道を書き換える。他のブラウザで viser 画面を開いていたら閉じておく）。
+
+```bash
+docker run --rm --network host -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/work -w /work \
+    mcr.microsoft.com/playwright/python:v1.63.0-noble \
+    sh -c "pip install -q --user --break-system-packages playwright==1.63.0 && \
+           xvfb-run -a -s '-screen 0 1920x1080x24' python scripts/make_manual.py"
+```
+
+スライド（`docs/manual/manual.md`）を直したら、HTML と PDF を書き出し直す。
+
+```bash
+docker run --rm -v "$PWD":/home/marp/app -e MARP_USER="$(id -u):$(id -g)" marpteam/marp-cli docs/manual/manual.md -o docs/manual/manual.html
+docker run --rm -v "$PWD":/home/marp/app -e MARP_USER="$(id -u):$(id -g)" marpteam/marp-cli docs/manual/manual.md --pdf --allow-local-files -o docs/manual/manual.pdf
+```
 
 ## サンプル動画
 
