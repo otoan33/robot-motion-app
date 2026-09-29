@@ -173,3 +173,72 @@ def plan_rmp_path(start, via, goal, max_vel, max_acc, lin_vel, lin_acc, rot_vel,
         stalled = 0.0 if np.max(np.abs(np.degrees(qd))) >= tol else stalled + dt
         if stalled > 0.5: raise ValueError(f"経路追従が終点の手前で止まりました（経路の {path.S[k] * 1000:.0f} / {path.S[-1] * 1000:.0f} mm。経路が障害物を通り抜けているなど）")
     raise ValueError(f"経路追従が {time_limit:.0f} 秒以内に終点へ収束しません（経路の {path.S[k] * 1000:.0f} / {path.S[-1] * 1000:.0f} mm）")
+
+
+# 動くターゲットの位置 [m]・速度・加速度を時刻 t [s] の関数にする。初期位置 p0 [m] から速さ speed [m/s] で動く
+# line: 方向 direction への等速直線。circle: 初期の向きを direction（水平に直したもの）とし、半径 radius [m] の水平な円を左回り（上から見て反時計回り）に回る
+def target_motion(p0, motion: str, speed: float, direction, radius: float):
+    d = np.asarray(direction, float) * ([1, 1, 0] if motion == "circle" else 1)
+    d /= np.linalg.norm(d)
+    if motion == "line": return lambda t: (p0 + speed * t * d, speed * d, np.zeros(3))
+    # 円の中心は初期位置から左（Z 軸 × 初期の向き）へ radius。θ は中心から見たターゲットの角度
+    c, w, th0 = p0 + radius * np.cross([0, 0, 1], d), speed / radius, np.arctan2(-d[0], d[1])
+    def f(t):
+        u = np.array([np.cos(th0 + w * t), np.sin(th0 + w * t), 0])
+        return c + radius * u, speed * np.cross([0, 0, 1], u), -speed * w * u
+    return f
+
+
+# 追いかけるポリシー。ずれ e を詰める速さを、距離 r に応じて「最大速度 vmax → 最大加速度 amax で止まれる速さ √(2·amax·r) → 最後は距離に比例 ω·r」とし、
+# 今の相対速度 ed（ẋ − ターゲットの速度）をその速度へ硬く（2ω）合わせる。詰める速さが距離とともに落ちていく分は、今の詰まる速さから先回りで与える（減速が遅れて行き過ぎないように）
+# 遠くでは最大速度で近づき、手前で最大加速度で減速して、最後は硬いばねで追いつく（経路追従の終点と同じ ω）。加速度は amax まで
+def chase(e: np.ndarray, ed: np.ndarray, vmax: float, amax: float, omega: float) -> np.ndarray:
+    r = np.linalg.norm(e)
+    u = e / (r + 1e-12)
+    v, dv = min((vmax, 0), (np.sqrt(2 * amax * r), amax / max(np.sqrt(2 * amax * r), 1e-12)), (omega * r, omega))
+    a = 2 * omega * (v * u - ed) - dv * max(u @ ed, 0) * u
+    return a * min(1, amax / (np.linalg.norm(a) + 1e-12))
+
+
+# 動くターゲットへの追従 RMP。ターゲットは目標の関節角度での先端姿勢から動き出し、姿勢はそのまま位置だけが動く（target_motion）
+# 先端の位置はターゲットとの相対で追いかけ（chase）、ターゲットの加速度を先回りで足す。遠くではターゲットに対して先端速度で近づき、追いついたら同じ速度で動きながらずれを戻す
+# 姿勢は目標の姿勢へ同じ形で寄せる。ターゲットが止まらないので、duration [s] だけ動かして終える（長さ mm・速さ mm/s・角度 deg）
+# 返り値の最後は、障害物との最小距離 [mm]（回避なしなら None）、追いついた時刻 [s]（位置 1 mm・姿勢 1° 以内に初めて入った時刻。追いつかなければ None）、追いついた後の位置の最大誤差 [mm]
+def plan_rmp_track(start, goal, motion: str, speed: float, direction, radius: float, duration: float, max_vel, max_acc, lin_vel, lin_acc, rot_vel, rot_acc, dt: float,
+                   avoid: float | None = None, weights=(1.0, 0.3, 1e-5)) -> tuple[list[float], list[list[float]], float | None, float | None, float | None]:
+    q, qd = np.radians(start), np.zeros(6)
+    vmax, amax = np.radians(max_vel), np.radians(max_acc)
+    Tg = arm.forward(np.radians(goal))[0]
+    target = target_motion(Tg[:3, 3], motion, speed / 1000, direction, radius / 1000)
+    # 先端の位置 [m]・姿勢 [rad] の最大速度・加速度。最後に距離に比例させる ω は経路追従の終点と同じ（5 mm 手前から比例）
+    v_p, a_p, v_r, a_r = lin_vel / 1000, lin_acc / 1000, np.radians(rot_vel), np.radians(rot_acc)
+    omega = np.sqrt(2 * a_p / 0.005)
+    w_p, w_r, w_q = weights
+    obs = Avoidance(avoid / 1000, a_p, lin_acc / lin_vel) if avoid else None
+
+    n, h = substeps(dt)
+    ts, qs, caught, err_max = [0.0], [q.copy()], None, 0.0
+    for i in range(int(round(duration / dt))):
+        if obs: obs.update(q)
+        for j in range(n):
+            T, J, Jdqd = jacobian(q, qd)
+            xd = J @ qd
+            p_t, v_t, a_t = target(i * dt + j * h)
+            # 各 RMP。先端の位置（ターゲットとの相対）・姿勢、特異点付近の安定用のごく弱い関節の正則化、障害物回避の順
+            q, qd = step(q, qd, [(J[:3], chase(p_t - T[:3, 3], xd[:3] - v_t, v_p, a_p, omega) + a_t - Jdqd[:3], w_p * np.eye(3)),
+                                 (J[3:], chase(rotvec(Tg[:3, :3] @ T[:3, :3].T), xd[3:], v_r, a_r, omega) - Jdqd[3:], w_r * np.eye(3)),
+                                 (np.eye(6), np.zeros(6), w_q * np.eye(6)), *(obs.leaves(q, qd) if obs else [])], vmax, amax, h)
+        ts.append(len(ts) * dt)
+        qs.append(q.copy())
+        # 追いついたか（位置 1 mm・姿勢 1° 以内）と、追いついた後の位置の誤差を記録する
+        T = arm.forward(q)[0]
+        e = np.linalg.norm(target(ts[-1])[0] - T[:3, 3]) * 1000
+        if caught is None and e < 1 and np.degrees(np.linalg.norm(rotvec(Tg[:3, :3] @ T[:3, :3].T))) < 1: caught = ts[-1]
+        if caught is not None: err_max = max(err_max, e)
+    return ts, np.degrees(qs).tolist(), obs.result() if obs else None, caught, err_max if caught is not None else None
+
+
+# 画面での表示用に、ターゲットの位置 [mm] を step [s] ごとに並べる（初期位置は目標の関節角度での先端位置）
+def track_target_path(goal, motion: str, speed: float, direction, radius: float, duration: float, step: float = 0.1) -> list[list[float]]:
+    target = target_motion(arm.forward(np.radians(goal))[0][:3, 3], motion, speed / 1000, direction, radius / 1000)
+    return [(target(t)[0] * 1000).tolist() for t in np.append(np.arange(0, duration, step), duration)]

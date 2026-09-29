@@ -12,7 +12,7 @@ viser_api = httpx.AsyncClient(base_url=os.environ.get("VISER_API_URL", "http://1
 
 # 動作モードの表示名
 MODE_LABELS = {"ptp": "PTP（関節補間・台形速度）", "lin": "LIN（直線補間・台形速度）", "rmp": "PTP（RMP 目標到達ポリシー）", "rmp_path": "経路追従（RMP・経由点の折れ線）",
-               "calib": "測定動作（レーザートラッカー校正）"}
+               "rmp_track": "追従（RMP・動くターゲット）", "calib": "測定動作（レーザートラッカー校正）"}
 
 
 @ui.page("/")
@@ -73,6 +73,7 @@ async def index(request: Request):
                 via_box = ui.column().classes("w-full")
                 ui.button("経由点を追加", on_click=add_via).props("flat")
 
+            # 追従では、目標位置の先端姿勢がターゲットの動き出す位置になる
             goal, goal_buttons, goal_card = pose_card("目標位置 [deg]", [40, -10, 20, 0, 60, 30])
             goal_card.bind_visibility_from(mode, "value", backward=lambda m: m != "calib")
             with goal_buttons:
@@ -90,7 +91,7 @@ async def index(request: Request):
                 max_vel = joint_inputs(defaults["max_vel"], 6)
                 ui.label("関節の最大加速度 [deg/s²]")
                 max_acc = joint_inputs(defaults["max_acc"], 6)
-                with ui.grid(columns=2).classes("w-full").bind_visibility_from(mode, "value", backward=lambda m: m in ("lin", "rmp", "rmp_path")):
+                with ui.grid(columns=2).classes("w-full").bind_visibility_from(mode, "value", backward=lambda m: m in ("lin", "rmp", "rmp_path", "rmp_track")):
                     lin_vel = ui.number("先端速度 [mm/s]", value=defaults["lin_vel"], min=0)
                     lin_acc = ui.number("先端加速度 [mm/s²]", value=defaults["lin_acc"], min=0)
                     rot_vel = ui.number("姿勢の角速度 [deg/s]", value=defaults["rot_vel"], min=0)
@@ -125,7 +126,19 @@ async def index(request: Request):
                 ui.label("可動範囲の上限 [deg]")
                 joint_max = joint_inputs(defaults["joint_max"])
 
-            # 障害物回避（RMP・経路追従）と測定動作の干渉チェック。障害物は robot-viser-app に登録し、その距離計算を使う（robot-viser-app を COLLISION=1 で起動しておく）
+            # 追従のターゲットの動き。目標位置の先端姿勢から動き出し、姿勢はそのままで位置だけが動く。追いついた後も追従時間まで追い続ける
+            with ui.card().classes("w-full").bind_visibility_from(mode, "value", value="rmp_track"):
+                ui.label("ターゲットの動き").classes("text-lg font-bold")
+                ui.label("目標位置の先端から動き出す").classes("text-xs text-gray-500")
+                with ui.grid(columns=2).classes("w-full"):
+                    track_motion = ui.select({"line": "直線（等速）", "circle": "円（水平・左回り）"}, value="line", label="動き")
+                    track_speed = ui.number("速さ [mm/s]", value=100, min=0)
+                    track_radius = ui.number("半径 [mm]", value=150, min=1).bind_visibility_from(track_motion, "value", value="circle")
+                    track_time = ui.number("追従時間 [s]", value=10, min=0.1)
+                ui.label("動く方向（円では動き出しの向き。水平に直す）")
+                track_dir = xyz_inputs([1, 0, 0])
+
+            # 障害物回避（RMP・経路追従・追従）と測定動作の干渉チェック。障害物は robot-viser-app に登録し、その距離計算を使う（robot-viser-app を COLLISION=1 で起動しておく）
             # 障害物は robot-viser-app の /obstacles と同じ JSON（座標は base_link 基準 [m]）で書く
             obstacles_res = await viser_api.get("/obstacles")
             # 画面の障害物を robot-viser-app に送る。手で書く JSON なので、読めない・形式が違うときは理由を表示して False を返す
@@ -147,7 +160,7 @@ async def index(request: Request):
             async def example_obstacle():
                 p = [(await client.post("/fk", json={"angles": [n.value for n in inputs]})).json()["position"] for inputs in (start, goal)]
                 obstacles_text.value = json.dumps([{"type": "sphere", "name": "ball", "center": [round((a + b) / 2000, 3) for a, b in zip(*p)], "radius": 0.06}], indent=1)
-            with ui.card().classes("w-full").bind_visibility_from(mode, "value", backward=lambda m: m in ("rmp", "rmp_path", "calib")):
+            with ui.card().classes("w-full").bind_visibility_from(mode, "value", backward=lambda m: m in ("rmp", "rmp_path", "rmp_track", "calib")):
                 ui.label("障害物").classes("text-lg font-bold")
                 if obstacles_res.status_code == 404:
                     ui.label("robot-viser-app の衝突判定が無効です（COLLISION=1 docker compose up -d で起動すると使えます）").classes("text-sm text-orange-700")
@@ -198,9 +211,10 @@ async def index(request: Request):
                 if mode.value == "calib": return await generate_calib()
                 req = {"mode": mode.value, "start": [n.value for n in start], "via": [[n.value for n in v] for v in vias], "goal": [n.value for n in goal], "blend": blend.value, "max_vel": [n.value for n in max_vel],
                        "max_acc": [n.value for n in max_acc], "lin_vel": lin_vel.value, "lin_acc": lin_acc.value, "rot_vel": rot_vel.value, "rot_acc": rot_acc.value,
-                       "dt": dt.value, "duration": duration.value}
+                       "dt": dt.value, "duration": duration.value, "track_motion": track_motion.value, "track_speed": track_speed.value, "track_dir": [n.value for n in track_dir],
+                       "track_radius": track_radius.value, "track_time": track_time.value}
                 # 障害物を避けるときは、画面の障害物を robot-viser-app に送ってから生成する（表示と計算に使う障害物を揃える）
-                use_avoid = obstacles_res.status_code != 404 and mode.value in ("rmp", "rmp_path") and avoid.value
+                use_avoid = obstacles_res.status_code != 404 and mode.value in ("rmp", "rmp_path", "rmp_track") and avoid.value
                 if use_avoid:
                     if not await send_obstacles(): return
                     req.update(avoid=True, avoid_distance=avoid_distance.value)
@@ -211,7 +225,14 @@ async def index(request: Request):
                 state["csv"], state["points_csv"] = res.text, None
                 rows = show_chart(res.text)
                 clearance = f"、障害物との最小距離 {res.headers['X-Min-Distance']} mm" if "X-Min-Distance" in res.headers else ""
-                ui.notify(f"{len(rows)}点 / {rows[-1][0]:.2f}秒の軌道を生成しました{clearance}")
+                # 追従では、追いついた時刻と追いついた後の最大誤差を出し、ターゲットの軌跡（橙の線、始点は緑・終点は赤の点）を robot-viser に描く
+                if mode.value == "rmp_track":
+                    clearance += f"、{res.headers['X-Catch-Time']} 秒で追いつき、その後の最大誤差 {res.headers['X-Track-Error']} mm" if "X-Catch-Time" in res.headers else "、追従時間内に追いつけませんでした"
+                    p = (await client.post("/track/target", json=req)).json()["positions"]
+                    shapes = [{"name": f"target_{i}", "type": "line", **dict(zip("xyz", a)), **dict(zip(("x2", "y2", "z2"), b)), "size": 4, "color": "#ff8800"} for i, (a, b) in enumerate(zip(p, p[1:]))]
+                    shapes += [{"name": "target_start", "type": "point", **dict(zip("xyz", p[0])), "size": 25, "color": "#00aa44"}, {"name": "target_end", "type": "point", **dict(zip("xyz", p[-1])), "size": 25, "color": "#ff0000"}]
+                    (await viser_api.post("/shapes", json={"shapes": shapes})).raise_for_status()
+                ui.notify(f"{len(rows)}点 / {rows[-1][0]:.2f}秒の軌道を生成しました{clearance}", multi_line=True)
 
             # robot-viser に CSV ファイルとして送って再生させる（シーク・停止は viser 画面の Time スライダーと Play/Stop で行う）
             async def play():

@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from backend.calib import plan_calib
 from backend.planner import arm, plan_lin, plan_ptp, tcp_pose
-from backend.rmp import plan_rmp, plan_rmp_path
+from backend.rmp import plan_rmp, plan_rmp_path, plan_rmp_track, track_target_path
 
 app = FastAPI(title="robot-motion API")
 
@@ -25,10 +25,14 @@ DEFAULTS = {"max_vel": [180.0] * 6, "max_acc": [720.0] * 6, "lin_vel": 250.0, "l
             "joint_min": [round(lo, 1) for lo, _ in arm.limits], "joint_max": [round(hi, 1) for _, hi in arm.limits]}
 
 
-# 軌道の生成条件。mode で動作の種類を切り替える（ptp: 関節補間、lin: 先端の直線補間、rmp: RMP の目標到達ポリシー、rmp_path: RMP の経路追従）
+# 長さ・方向などの 3 次元ベクトル
+Vec3 = Annotated[list[float], Field(min_length=3, max_length=3)]
+
+
+# 軌道の生成条件。mode で動作の種類を切り替える（ptp: 関節補間、lin: 先端の直線補間、rmp: RMP の目標到達ポリシー、rmp_path: RMP の経路追従、rmp_track: RMP の動くターゲットへの追従）
 # duration は ptp・lin だけで使う（rmp・rmp_path の動作時間はポリシーで決まる）。via（経由点の関節角度）と blend（角を丸める距離 [mm]）は rmp_path だけで使う
 class TrajectoryRequest(BaseModel):
-    mode: Literal["ptp", "lin", "rmp", "rmp_path"] = "ptp"
+    mode: Literal["ptp", "lin", "rmp", "rmp_path", "rmp_track"] = "ptp"
     start: Joints
     via: list[Joints] = []
     goal: Joints
@@ -44,24 +48,37 @@ class TrajectoryRequest(BaseModel):
     # rmp・rmp_path で、robot-viser-app に登録した障害物を避ける RMP を合成する。avoid_distance は回避を効かせ始める距離 [mm]
     avoid: bool = False
     avoid_distance: float = Field(100.0, gt=0)
+    # rmp_track のターゲットの動き。目標の関節角度での先端姿勢から、速さ track_speed [mm/s] で動く
+    # line: 方向 track_dir への等速直線、circle: 初期の向き track_dir（水平に直したもの）から、半径 track_radius [mm] の水平な円を左回り。track_time [s] だけ追い続ける
+    track_motion: Literal["line", "circle"] = "line"
+    track_speed: float = Field(100.0, ge=0)
+    track_dir: Vec3 = [1.0, 0.0, 0.0]
+    track_radius: float = Field(150.0, gt=0)
+    track_time: float = Field(10.0, gt=0)
 
 
-# 生成条件から軌道（時刻 [s] と6関節角度 [deg] の列）と、障害物との最小距離 [mm]（障害物回避したときのみ。それ以外は None）を作る
-def generate(req: TrajectoryRequest) -> tuple[list[float], list[list[float]], float | None]:
+# 生成条件から軌道（時刻 [s] と6関節角度 [deg] の列）と、結果の補足を作る。補足は min_distance（障害物との最小距離 [mm]。障害物回避したときのみ）、
+# rmp_track の catch_time（追いついた時刻 [s]。追いつかなければ None）・track_error（追いついた後の位置の最大誤差 [mm]）
+def generate(req: TrajectoryRequest) -> tuple[list[float], list[list[float]], dict]:
     avoid = req.avoid_distance if req.avoid else None
     if req.mode == "lin":
-        return *plan_lin(req.start, req.goal, req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.dt, req.duration), None
+        return *plan_lin(req.start, req.goal, req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.dt, req.duration), {}
     if req.mode == "rmp":
-        return plan_rmp(req.start, req.goal, req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.dt, avoid)
+        times, angles, d = plan_rmp(req.start, req.goal, req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.dt, avoid)
+        return times, angles, {"min_distance": d}
     if req.mode == "rmp_path":
-        return plan_rmp_path(req.start, req.via, req.goal, req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.blend, req.dt, avoid)
-    return *plan_ptp(req.start, req.goal, req.max_vel, req.max_acc, req.dt, req.duration), None
+        times, angles, d = plan_rmp_path(req.start, req.via, req.goal, req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.blend, req.dt, avoid)
+        return times, angles, {"min_distance": d}
+    if req.mode == "rmp_track":
+        times, angles, d, caught, err = plan_rmp_track(req.start, req.goal, req.track_motion, req.track_speed, req.track_dir, req.track_radius, req.track_time,
+                                                       req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.dt, avoid)
+        return times, angles, {"min_distance": d, "catch_time": caught, "track_error": err}
+    return *plan_ptp(req.start, req.goal, req.max_vel, req.max_acc, req.dt, req.duration), {}
 
 
 # レーザートラッカーでのキャリブレーション用の測定動作の生成条件。長さは mm（base_link 基準）、角度は deg
 # target_offset / target_dir はターゲット（SMR）の tool0 座標での位置と、ミラーが向く方向。cone はミラーの向きとトラッカー方向のなす角の許容値
 # area_min / area_max を両方指定すると、ターゲット位置をその箱の中に限る（なければ動作領域全体）。margin は障害物との安全距離
-Vec3 = Annotated[list[float], Field(min_length=3, max_length=3)]
 
 
 class CalibRequest(BaseModel):
@@ -96,7 +113,7 @@ def post_calib(req: CalibRequest):
 # 選べる動作モードと既定の設定を返す（calib は /calib で作る測定動作）
 @app.get("/modes")
 def get_modes():
-    return {"modes": ["ptp", "lin", "rmp", "rmp_path", "calib"], "defaults": DEFAULTS}
+    return {"modes": ["ptp", "lin", "rmp", "rmp_path", "rmp_track", "calib"], "defaults": DEFAULTS}
 
 
 # 関節角度 [deg] での先端（tool0）の位置 [mm] と姿勢 roll / pitch / yaw [deg] を返す
@@ -113,14 +130,22 @@ def post_fk(req: AnglesRequest):
 # 軌道を生成して JSON で返す
 @app.post("/trajectory")
 def post_trajectory(req: TrajectoryRequest):
-    times, angles, min_distance = generate(req)
-    return {"times": times, "angles": angles, "duration_sec": times[-1], "num_points": len(times), "min_distance": min_distance}
+    times, angles, info = generate(req)
+    return {"times": times, "angles": angles, "duration_sec": times[-1], "num_points": len(times), "min_distance": None, **info}
 
 
-# 軌道を生成し、robot-viser-app がそのまま読める t 形式の CSV（t[sec], joint1..joint6[deg]）で返す。障害物との最小距離 [mm] はヘッダ X-Min-Distance で返す
+# 軌道を生成し、robot-viser-app がそのまま読める t 形式の CSV（t[sec], joint1..joint6[deg]）で返す
+# 障害物との最小距離 [mm]・追いついた時刻 [s]・追いついた後の最大誤差 [mm] は、値があるときだけヘッダ X-Min-Distance・X-Catch-Time・X-Track-Error で返す
 @app.post("/trajectory/csv", response_class=PlainTextResponse)
 def post_trajectory_csv(req: TrajectoryRequest):
-    times, angles, min_distance = generate(req)
+    times, angles, info = generate(req)
     rows = [f"{t:.4f}," + ",".join(f"{a:.6f}" for a in q) for t, q in zip(times, angles)]
     csv = "\n".join(["t," + ",".join(f"joint{i}" for i in range(1, 7)), *rows]) + "\n"
-    return PlainTextResponse(csv, headers={} if min_distance is None else {"X-Min-Distance": f"{min_distance:.1f}"})
+    names = {"min_distance": ("X-Min-Distance", "{:.1f}"), "catch_time": ("X-Catch-Time", "{:.2f}"), "track_error": ("X-Track-Error", "{:.2f}")}
+    return PlainTextResponse(csv, headers={names[k][0]: names[k][1].format(v) for k, v in info.items() if v is not None})
+
+
+# rmp_track のターゲットの位置 [mm] を 0.1 秒ごとに返す（画面でターゲットの軌跡を描く用。軌道の生成はしない）
+@app.post("/track/target")
+def post_track_target(req: TrajectoryRequest):
+    return {"positions": track_target_path(req.goal, req.track_motion, req.track_speed, req.track_dir, req.track_radius, req.track_time)}
