@@ -21,6 +21,11 @@ from playwright.sync_api import Locator, Page, sync_playwright
 OUT = Path(__file__).resolve().parent.parent / "docs" / "manual" / "img"
 # 姿勢は README・サンプル動画と同じ A → B。LIN の失敗例は B と先端の姿勢が同じで手首の形態だけが違う目標
 A, B, B_FLIP = [0, -20, 30, 0, 40, 0], [40, -10, 20, 0, 60, 30], [40, -10, 20, 180, -60, -150]
+# 測定動作の障害物（床と、ロボットの横の台）。座標は base_link 基準 [m]
+FLOOR = """[
+ {"type": "box", "name": "floor", "center": [0, 0, -0.06], "size": [4, 4, 0.1]},
+ {"type": "box", "name": "table", "center": [0.8, 0.8, 0.3], "size": [0.4, 0.4, 0.6]}
+]"""
 
 
 class Manual:
@@ -29,8 +34,9 @@ class Manual:
         self.viser = page.frame_locator("iframe")
 
     def open(self):
-        """robot-viser の障害物を消してから開き直す（前の操作の状態を残さない）。"""
+        """robot-viser の障害物・補助図形を消してから開き直す（前の操作の状態を残さない）。"""
         self.page.request.post(f"{self.args.viser_api}/obstacles", data={"obstacles": []})
+        self.page.request.post(f"{self.args.viser_api}/shapes", data={"shapes": []})
         self.page.request.post(f"{self.args.viser_api}/joints", data={"angles": A})
         self.page.goto(self.args.url)
         self.page.get_by_text("先端 XYZ").first.wait_for()
@@ -141,7 +147,7 @@ def steps(m: Manual):
 
     # ---- 障害物回避（目標到達で、開始と目標の間に置いた球を避ける） ----
     m.mode("PTP（RMP 目標到達ポリシー）")
-    avoid = m.card("障害物回避")
+    avoid = m.card("障害物")
     m.button("例を入れる").click()
     page.wait_for_timeout(500)
     m.shot("15_obstacle", m.button("例を入れる"), avoid.locator("textarea"), top=avoid)
@@ -150,23 +156,59 @@ def steps(m: Manual):
     m.shot("16_send", m.button("viser に送る"), note, page.locator("iframe"), top=avoid)
     page.get_by_text("障害物を避ける", exact=True).click()
     note = m.notify(m.button("生成"), "最小距離")
-    m.shot("17_avoid", (page.locator(".q-checkbox"), m.field("影響距離 [mm]")), m.button("生成"), note, top=avoid)
+    m.shot("17_avoid", (page.locator(".q-checkbox:visible"), m.field("影響距離 [mm]")), m.button("生成"), note, top=avoid)
+
+    # ---- 測定動作（床と台を置き、エリアの中に 20 点を選ぶ） ----
+    m.open()
+    m.mode("測定動作（レーザートラッカー校正）")
+    calib = m.card("測定動作")
+    grids = calib.locator(".nicegui-grid")
+    m.field("測定点数", calib).locator("input").fill("20")
+    m.shot("18_calib", grids.nth(0), grids.nth(1), (grids.nth(2), grids.nth(3)), top=calib)
+    page.get_by_text("エリアを指定する", exact=True).click()
+    m.shot("19_calib_area", page.locator(".q-checkbox:visible"), (grids.nth(4), grids.nth(5)), (grids.nth(6), grids.nth(7)), top=page.locator(".q-checkbox:visible"))
+    obstacles = m.card("障害物")
+    obstacles.locator("textarea").fill(FLOOR)
+    note = m.notify(m.button("viser に送る"), "障害物を robot-viser に送りました")
+    page.wait_for_timeout(1000)  # robot-viser に床と台が描かれるのを待つ
+    m.shot("20_calib_obstacle", obstacles.locator("textarea"), m.button("viser に送る"), page.locator("iframe"), top=obstacles)
+    note = m.notify(m.button("生成"), "の測定動作を生成しました")
+    page.wait_for_timeout(1000)  # robot-viser に測定点が描かれるのを待つ
+    m.shot("21_calib_generate", m.button("生成"), chart.locator(".nicegui-echart"), note, page.locator("iframe"), top=chart)
+    m.button("再生").click()
+    page.wait_for_timeout(1500)
+    m.viser.get_by_role("button", name="Stop").click()
+    with page.expect_download():
+        m.button("CSV 保存").click()
+    m.shot("22_calib_save", (m.button("再生"), m.button("CSV 保存")), (m.viser.get_by_text("Time (frame)"), m.viser.get_by_role("button", name="Play")), top=chart)
 
     # ---- 困ったとき（開き直してから、わざと失敗させる） ----
     m.open()
     m.mode("LIN（直線補間・台形速度）")
     m.set_joints("目標位置 [deg]", B_FLIP)
     note = m.notify(m.button("生成"), "一致しません")
-    m.shot("18_lin_error", m.card("目標位置 [deg]").locator(".nicegui-grid"), note, top=m.card("目標位置 [deg]"))
+    m.shot("23_lin_error", m.card("目標位置 [deg]").locator(".nicegui-grid"), note, top=m.card("目標位置 [deg]"))
     m.open()
     m.mode("PTP（RMP 目標到達ポリシー）")
     page.get_by_text("障害物を避ける", exact=True).click()
-    m.card("障害物回避").locator("textarea").fill('[{"type": "sphere", "center": [0.3, 0.8, 1.3], "radius": 0.06,}]')
+    m.card("障害物").locator("textarea").fill('[{"type": "sphere", "center": [0.3, 0.8, 1.3], "radius": 0.06,}]')
     note = m.notify(m.button("生成"), "JSON が読めません")
-    m.shot("19_json_error", m.card("障害物回避").locator("textarea"), note, top=m.card("障害物回避"))
+    m.shot("24_json_error", m.card("障害物").locator("textarea"), note, top=m.card("障害物"))
 
-    # 撮影で置いた障害物を robot-viser から消す
+    # 測定動作のエリアを 10 mm 角に狭めて、測定点が見つからないようにする
+    m.open()
+    m.mode("測定動作（レーザートラッカー校正）")
+    calib = m.card("測定動作")
+    page.get_by_text("エリアを指定する", exact=True).click()
+    for i, v in enumerate([0, 800, 800]):
+        calib.locator(".nicegui-grid").nth(4).locator("input").nth(i).fill(str(v))
+        calib.locator(".nicegui-grid").nth(5).locator("input").nth(i).fill(str(v + 10))
+    note = m.notify(m.button("生成"), "測定点が")
+    m.shot("25_calib_error", (calib.locator(".nicegui-grid").nth(4), calib.locator(".nicegui-grid").nth(5)), note, top=page.locator(".q-checkbox:visible"))
+
+    # 撮影で置いた障害物・補助図形を robot-viser から消す
     page.request.post(f"{m.args.viser_api}/obstacles", data={"obstacles": []})
+    page.request.post(f"{m.args.viser_api}/shapes", data={"shapes": []})
 
 
 def main():

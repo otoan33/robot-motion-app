@@ -42,6 +42,20 @@ plt.rcParams["font.family"] = "IPAGothic"
 A, B, C = [0, -20, 30, 0, 40, 0], [40, -10, 20, 0, 60, 30], [-35, 5, 10, 0, 45, -30]
 
 
+# 測定動作の障害物（床と、ロボットの横の台）
+FLOOR = [{"type": "box", "name": "floor", "center": [0, 0, -0.06], "size": [4, 4, 0.1]}, {"type": "box", "name": "table", "center": [0.8, 0.8, 0.3], "size": [0.4, 0.4, 0.6]}]
+
+
+# 測定動作の確認用の補助図形（画面の「生成」と同じく、トラッカー・測定点・経由点・エリア）。寸法は mm
+def calib_shapes(req: dict, points: list) -> list:
+    shapes = [{"name": "tracker", "type": "sphere", **dict(zip("xyz", req.get("tracker", [0, 2500, 800]))), "size": 60, "color": "#0080ff"}]
+    shapes += [{"name": f"{i}_{p['label']}", "type": "point", **dict(zip("xyz", p["position"])), "size": 25 if p["label"] == "measure" else 15, "color": "#ff0000" if p["label"] == "measure" else "#808080"}
+               for i, p in enumerate(points) if p["label"] in ("measure", "via")]
+    if "area_min" in req: shapes.append({"name": "area", "type": "box", **{k: (a + b) / 2 for k, a, b in zip("xyz", req["area_min"], req["area_max"])},
+                                         **{k: b - a for k, a, b in zip(("sx", "sy", "sz"), req["area_min"], req["area_max"])}, "color": "#00aa44", "opacity": 0.15})
+    return shapes
+
+
 # 開始・目標の先端位置 [m] の中間を少しずらした点（障害物の置き場所）
 def mid(p, q, offset=(0, 0, 0)):
     return (np.add(tcp_pose(p)[0], tcp_pose(q)[0]) / 2000 + offset).round(3).tolist()
@@ -68,7 +82,13 @@ VIDEOS = [
        [{"type": "capsule", "name": "pole", "p1": mid(B, C, (0, 0, -0.4)), "p2": mid(B, C, (0, 0, 0.05)), "radius": 0.04}]),
       ("経路追従 A → B（直線）：経路の 22 mm 横を通る球", {"mode": "rmp_path", "start": A, "goal": B, "avoid": True},
        [{"type": "sphere", "name": "ball", "center": mid(A, B, (0, 0, 0.18)), "radius": 0.06}])]),
+    # 測定動作は mode が calib のとき /calib で作る（生成条件は /calib のリクエスト）。トラッカーは既定の [0, 2500, 800] mm
+    ("06_calib", "測定動作（レーザートラッカー校正）", "トラッカーから見えて干渉しない測定点を広く選び、全軸 0° から動作時間が短い順に回って 0° に戻る",
+     [("床と台を置き、届く範囲全体から 20 点", {"mode": "calib", "num_points": 20}, FLOOR),
+      ("エリア（緑の箱）の中から 15 点", {"mode": "calib", "num_points": 15, "area_min": [-500, 400, 300], "area_max": [500, 1200, 1300]}, FLOOR)]),
 ]
+# 測定動作の動画は、2.5 m 先のトラッカーまで写るよう、ほかの動画より引いて撮る（ホイールの回数）
+ZOOM_OUT = {"06_calib": 7}
 
 
 # 生成した CSV（t 形式）→ 時刻 [s] と関節角度 [deg]
@@ -145,18 +165,34 @@ def main():
             if args.only and no not in args.only: continue
             print(f"== {no}. {title}", flush=True)
             frames = [title_card(title, desc, [s for s, _, _ in samples])] * (FPS * 3)
+            if page and name in ZOOM_OUT:
+                for _ in range(ZOOM_OUT[name]): page.mouse.wheel(0, 150); page.wait_for_timeout(300)
             for i, (label, req, obstacles) in enumerate(samples, 1):
                 # 障害物を登録してから生成する（回避の計算と録画の表示に使う）
                 viser.post("/obstacles", json={"obstacles": obstacles}).raise_for_status()
-                res = motion.post("/trajectory/csv", json=req)
-                if res.status_code != 200: raise SystemExit(f"{label}: {res.text}")
-                t, q = parse(res.text)
-                dmin = res.headers.get("X-Min-Distance")
-                print(f"  {i}. {label}: {t[-1]:.2f} s / {len(t)} 点" + (f" / 障害物との最小距離 {dmin} mm" if dmin else ""), flush=True)
+                calib = req.get("mode") == "calib"
+                # 測定動作は /calib で作り、トラッカー・測定点などを補助図形で描く
+                if calib:
+                    res = motion.post("/calib", json={k: v for k, v in req.items() if k != "mode"})
+                    if res.status_code != 200: raise SystemExit(f"{label}: {res.text}")
+                    r = res.json()
+                    text, dmin, info = r["trajectory_csv"], None, f"測定点 {r['num_measure']}・経由点 {r['num_via']}"
+                    viser.post("/shapes", json={"shapes": calib_shapes(req, r["points"])}).raise_for_status()
+                else:
+                    res = motion.post("/trajectory/csv", json=req)
+                    if res.status_code != 200: raise SystemExit(f"{label}: {res.text}")
+                    text, dmin, info = res.text, res.headers.get("X-Min-Distance"), None
+                t, q = parse(text)
+                print(f"  {i}. {label}: {t[-1]:.2f} s / {len(t)} 点" + (f" / 障害物との最小距離 {dmin} mm" if dmin else "") + (f" / {info}" if info else ""), flush=True)
                 if args.dry_run: continue
 
                 # 右のパネルの下段: 障害物があれば近似球と障害物の最小距離、なければ先端の速さ
-                if obstacles:
+                # 測定動作は、床に接する根元の球（動かして避けられないので生成でも見ない）を除いた距離にする
+                if calib:
+                    D = [viser.post("/distances", json={"angles": list(a)}).json() for a in q]
+                    metric = np.array([min(p["distance"] for p in d["pairs"] if d["control_points"][p["point"]]["link"] != "base_link") * 1000 for d in D])
+                    metric_label, dmin = "障害物との最小距離 [mm]（根元を除く）", f"{metric.min():.1f}"
+                elif obstacles:
                     metric = np.array([viser.post("/distances", json={"angles": list(a)}).json()["min_distance"] * 1000 for a in q])
                     metric_label = "障害物との最小距離 [mm]"
                 else:
@@ -165,15 +201,17 @@ def main():
                 panel, to_px = draw_panel(t, q, metric, metric_label)
 
                 # robot-viser-app で録画（1 コマずつ描画した mp4）し、コマごとに説明とパネル（今の時刻の縦線つき）を付ける
-                video = viser.post("/trajectory/record", params={"format": "mp4"}, files={"file": ("motion.csv", res.text.encode())})
+                video = viser.post("/trajectory/record", params={"format": "mp4"}, files={"file": ("motion.csv", text.encode())})
                 video.raise_for_status()
                 with tempfile.NamedTemporaryFile(suffix=".mp4") as f:
                     f.write(video.content)
                     f.flush()
                     render = [Image.fromarray(fr).resize((RENDER_W, H)) for fr in imageio.mimread(f.name, memtest=False)]
-                sub = f"{i}/{len(samples)}  {label}" + (f"（最小距離 {dmin} mm）" if dmin else "")
+                # 測定動作は、点の数と最小距離を 3 行目に分ける（1 行では左の画面に収まらない）
+                sub = f"{i}/{len(samples)}  {label}" + (f"（最小距離 {dmin} mm）" if dmin and not info else "")
+                lines = [(title, 28), (sub, 22)] + ([(f"{info}・最小距離 {dmin} mm", 22)] if info else [])
                 for k, fr in enumerate(render):
-                    left = caption(fr, [(title, 28), (sub, 22)])
+                    left = caption(fr, lines)
                     right = panel.copy()
                     x = to_px(min(k / FPS, t[-1]))
                     ImageDraw.Draw(right).line([(x, 0), (x, H)], fill=(220, 40, 40), width=2)
@@ -183,6 +221,9 @@ def main():
                 # 次のサンプルの前に、最後のコマを 1 秒止める
                 frames += [frames[-1]] * FPS
             viser.post("/obstacles", json={"obstacles": []}).raise_for_status()
+            viser.post("/shapes", json={"shapes": []}).raise_for_status()
+            if page and name in ZOOM_OUT:
+                for _ in range(ZOOM_OUT[name]): page.mouse.wheel(0, -150); page.wait_for_timeout(300)
             if args.dry_run: continue
             path = OUT / f"{name}.mp4"
             imageio.mimwrite(path, frames, fps=FPS, quality=7, macro_block_size=8)
