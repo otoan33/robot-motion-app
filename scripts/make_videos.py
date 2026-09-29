@@ -15,6 +15,7 @@
 import argparse
 import csv
 import io
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -32,7 +33,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from backend.planner import tcp_pose  # noqa: E402
 
-MOTION_URL, VISER_API_URL, VISER_URL = "http://127.0.0.1:8100", "http://127.0.0.1:8000", "http://127.0.0.1:8081"
+# robot-motion-app の API は、環境変数 MOTION_URL で別のポートのもの（開発中のコードで起動したものなど）に変えられる
+MOTION_URL, VISER_API_URL, VISER_URL = os.environ.get("MOTION_URL", "http://127.0.0.1:8100"), "http://127.0.0.1:8000", "http://127.0.0.1:8081"
 OUT = Path("docs/videos")
 FPS, RENDER_W, PANEL_W, H = 20, 800, 480, 720
 FONT = "/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf"
@@ -54,6 +56,13 @@ def calib_shapes(req: dict, points: list) -> list:
     if "area_min" in req: shapes.append({"name": "area", "type": "box", **{k: (a + b) / 2 for k, a, b in zip("xyz", req["area_min"], req["area_max"])},
                                          **{k: b - a for k, a, b in zip(("sx", "sy", "sz"), req["area_min"], req["area_max"])}, "color": "#00aa44", "opacity": 0.15})
     return shapes
+
+
+# 追従のターゲットの軌跡（画面の「生成」と同じく、橙の線と、始点は緑・終点は赤の点）。positions は 0.1 秒ごとの位置 [mm]
+def track_shapes(positions) -> list:
+    shapes = [{"name": f"target_{i}", "type": "line", **dict(zip("xyz", a)), **dict(zip(("x2", "y2", "z2"), b)), "size": 4, "color": "#ff8800"} for i, (a, b) in enumerate(zip(positions, positions[1:]))]
+    return shapes + [{"name": "target_start", "type": "point", **dict(zip("xyz", positions[0])), "size": 25, "color": "#00aa44"},
+                     {"name": "target_end", "type": "point", **dict(zip("xyz", positions[-1])), "size": 25, "color": "#ff0000"}]
 
 
 # 開始・目標の先端位置 [m] の中間を少しずらした点（障害物の置き場所）
@@ -86,6 +95,11 @@ VIDEOS = [
     ("06_calib", "測定動作（レーザートラッカー校正）", "トラッカーから見えて干渉しない測定点を広く選び、全軸 0° から動作時間が短い順に回って 0° に戻る",
      [("床と台を置き、届く範囲全体から 20 点", {"mode": "calib", "num_points": 20}, FLOOR),
       ("エリア（緑の箱）の中から 15 点", {"mode": "calib", "num_points": 15, "area_min": [-500, 400, 300], "area_max": [500, 1200, 1300]}, FLOOR)]),
+    # 追従は A から、B の先端から動き出すターゲットを追う（8 秒ずつ）
+    ("07_rmp_track", "RMP 追従（動くターゲット）", "目標位置の先端から動き出すターゲットに先端速度で近づき、追いついたらそのまま追い続ける",
+     [("直線 +X 方向・100 mm/s（コンベア）", {"mode": "rmp_track", "start": A, "goal": B, "track_motion": "line", "track_speed": 100, "track_time": 8}, []),
+      ("円 半径 150 mm・150 mm/s", {"mode": "rmp_track", "start": A, "goal": B, "track_motion": "circle", "track_speed": 150, "track_time": 8}, []),
+      ("円 半径 150 mm・300 mm/s", {"mode": "rmp_track", "start": A, "goal": B, "track_motion": "circle", "track_speed": 300, "track_time": 8}, [])]),
 ]
 # 測定動作の動画は、2.5 m 先のトラッカーまで写るよう、ほかの動画より引いて撮る（ホイールの回数）
 ZOOM_OUT = {"06_calib": 7}
@@ -183,7 +197,12 @@ def main():
                     if res.status_code != 200: raise SystemExit(f"{label}: {res.text}")
                     text, dmin, info = res.text, res.headers.get("X-Min-Distance"), None
                 t, q = parse(text)
-                print(f"  {i}. {label}: {t[-1]:.2f} s / {len(t)} 点" + (f" / 障害物との最小距離 {dmin} mm" if dmin else "") + (f" / {info}" if info else ""), flush=True)
+                # 追従は、ターゲットの軌跡を補助図形で描き、追いついた時刻を説明に出す
+                track, catch = None, res.headers.get("X-Catch-Time") if not calib else None
+                if req.get("mode") == "rmp_track":
+                    track = np.array(motion.post("/track/target", json=req).json()["positions"])
+                    viser.post("/shapes", json={"shapes": track_shapes(track.tolist())}).raise_for_status()
+                print(f"  {i}. {label}: {t[-1]:.2f} s / {len(t)} 点" + (f" / 障害物との最小距離 {dmin} mm" if dmin else "") + (f" / {info}" if info else "") + (f" / {catch} 秒で追いつく" if catch else ""), flush=True)
                 if args.dry_run: continue
 
                 # 右のパネルの下段: 障害物があれば近似球と障害物の最小距離、なければ先端の速さ
@@ -192,6 +211,10 @@ def main():
                     D = [viser.post("/distances", json={"angles": list(a)}).json() for a in q]
                     metric = np.array([min(p["distance"] for p in d["pairs"] if d["control_points"][p["point"]]["link"] != "base_link") * 1000 for d in D])
                     metric_label, dmin = "障害物との最小距離 [mm]（根元を除く）", f"{metric.min():.1f}"
+                elif track is not None:
+                    # 右のパネルの下段は、先端とターゲットの距離（ターゲットの位置は 0.1 秒ごとなので時刻で補間する）
+                    P, tt = np.array([tcp_pose(a)[0] for a in q]), np.minimum(np.arange(len(track)) * 0.1, t[-1])
+                    metric, metric_label = np.linalg.norm(P - np.stack([np.interp(t, tt, track[:, k]) for k in range(3)], 1), axis=1), "ターゲットとの距離 [mm]"
                 elif obstacles:
                     metric = np.array([viser.post("/distances", json={"angles": list(a)}).json()["min_distance"] * 1000 for a in q])
                     metric_label = "障害物との最小距離 [mm]"
@@ -208,7 +231,7 @@ def main():
                     f.flush()
                     render = [Image.fromarray(fr).resize((RENDER_W, H)) for fr in imageio.mimread(f.name, memtest=False)]
                 # 測定動作は、点の数と最小距離を 3 行目に分ける（1 行では左の画面に収まらない）
-                sub = f"{i}/{len(samples)}  {label}" + (f"（最小距離 {dmin} mm）" if dmin and not info else "")
+                sub = f"{i}/{len(samples)}  {label}" + (f"（最小距離 {dmin} mm）" if dmin and not info else "") + (f"（{catch} 秒で追いつく）" if catch else "")
                 lines = [(title, 28), (sub, 22)] + ([(f"{info}・最小距離 {dmin} mm", 22)] if info else [])
                 for k, fr in enumerate(render):
                     left = caption(fr, lines)
