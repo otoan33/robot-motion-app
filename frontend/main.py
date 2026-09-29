@@ -12,7 +12,8 @@ viser_api = httpx.AsyncClient(base_url=os.environ.get("VISER_API_URL", "http://1
 
 # 動作モードの表示名
 MODE_LABELS = {"ptp": "PTP（関節補間・台形速度）", "lin": "LIN（直線補間・台形速度）", "rmp": "PTP（RMP 目標到達ポリシー）", "rmp_path": "経路追従（RMP・経由点の折れ線）",
-               "rmp_track": "追従（RMP・動くターゲット）", "calib": "測定動作（レーザートラッカー校正）"}
+               "rmp_track": "追従（RMP・動くターゲット）", "calib": "測定動作（レーザートラッカー校正）",
+               "calib_axis": "単軸動作（レーザートラッカー校正）"}
 
 
 @ui.page("/")
@@ -59,8 +60,8 @@ async def index(request: Request):
                     with buttons: ui.button("表示", on_click=lambda: show_pose(inputs)).props("flat")
                 return inputs, buttons, card
             start, _, start_card = pose_card("開始位置 [deg]", [0, -20, 30, 0, 40, 0])
-            # 測定動作は全軸 0° から始まり 0° に戻るので、開始・目標は使わない
-            start_card.bind_visibility_from(mode, "value", backward=lambda m: m != "calib")
+            # 測定動作・単軸動作は全軸 0° から始まり 0° に戻るので、開始・目標は使わない
+            start_card.bind_visibility_from(mode, "value", backward=lambda m: m not in ("calib", "calib_axis"))
 
             # 経路追従の経由点（開始→経由点→目標の順に先端位置を結ぶ）。追加時は開始と目標の中間の関節角度を初期値にする
             vias = []
@@ -75,7 +76,7 @@ async def index(request: Request):
 
             # 追従では、目標位置の先端姿勢がターゲットの動き出す位置になる
             goal, goal_buttons, goal_card = pose_card("目標位置 [deg]", [40, -10, 20, 0, 60, 30])
-            goal_card.bind_visibility_from(mode, "value", backward=lambda m: m != "calib")
+            goal_card.bind_visibility_from(mode, "value", backward=lambda m: m not in ("calib", "calib_axis"))
             with goal_buttons:
                 # 往復動作を作りやすいよう、開始と目標を入れ替える（経由点は順番を逆にする）
                 def swap():
@@ -101,11 +102,11 @@ async def index(request: Request):
                     dt = ui.number("周期 dt [s]", value=defaults["dt"], min=0.001, step=0.001, format="%.3f")
                     duration = ui.number("動作時間 [s]", min=0).props("hint=空欄なら制限内で最短").bind_visibility_from(mode, "value", backward=lambda m: m in ("ptp", "lin"))
 
-            # レーザートラッカー校正の測定動作。座標は base_link 基準 [mm]、ターゲット（SMR）の位置・ミラーの向きは tool0 座標
-            with ui.card().classes("w-full").bind_visibility_from(mode, "value", value="calib"):
+            # レーザートラッカー校正の測定動作・単軸動作。座標は base_link 基準 [mm]、ターゲット（SMR）の位置・ミラーの向きは tool0 座標
+            with ui.card().classes("w-full").bind_visibility_from(mode, "value", backward=lambda m: m in ("calib", "calib_axis")):
                 ui.label("測定動作").classes("text-lg font-bold")
                 with ui.grid(columns=3).classes("w-full"):
-                    num_points = ui.number("測定点数", value=100, min=1, precision=0)
+                    num_points = ui.number("測定点数", value=100, min=1, precision=0).bind_visibility_from(mode, "value", value="calib")
                     cone = ui.number("許容角 [deg]", value=30, min=1, max=90).props('hint="ミラーの向きとトラッカー方向"')
                     margin = ui.number("安全距離 [mm]", value=10, min=0).props('hint="障害物との距離"')
                 ui.label("トラッカーの位置 [mm]")
@@ -114,17 +115,32 @@ async def index(request: Request):
                 target_offset = xyz_inputs([0, 0, 0])
                 ui.label("ターゲットのミラーの向き（tool0 座標）")
                 target_dir = xyz_inputs([0, 0, 1])
-                # 測定点を置くエリア（ターゲット位置の範囲）。指定しなければ動作領域全体を使う
-                use_area = ui.checkbox("エリアを指定する")
-                with ui.column().classes("w-full").bind_visibility_from(use_area, "value"):
-                    ui.label("エリアの最小 [mm]")
-                    area_min = xyz_inputs([-500, 400, 300])
-                    ui.label("エリアの最大 [mm]")
-                    area_max = xyz_inputs([500, 1200, 1300])
+                # 単軸動作はミラーがフランジ面と平行（tool0 の x 軸）に付く前提なので、モードに合わせて向きの初期値を切り替える
+                def default_dir(e):
+                    if e.value in ("calib", "calib_axis"):
+                        for n, v in zip(target_dir, [0, 0, 1] if e.value == "calib" else [1, 0, 0]): n.value = v
+                mode.on_value_change(default_dir)
+                # 測定点を置くエリア（ターゲット位置の範囲）。指定しなければ動作領域全体を使う（測定動作のみ）
+                with ui.column().classes("w-full").bind_visibility_from(mode, "value", value="calib"):
+                    use_area = ui.checkbox("エリアを指定する")
+                    with ui.column().classes("w-full").bind_visibility_from(use_area, "value"):
+                        ui.label("エリアの最小 [mm]")
+                        area_min = xyz_inputs([-500, 400, 300])
+                        ui.label("エリアの最大 [mm]")
+                        area_max = xyz_inputs([500, 1200, 1300])
                 ui.label("可動範囲の下限 [deg]")
                 joint_min = joint_inputs(defaults["joint_min"])
                 ui.label("可動範囲の上限 [deg]")
                 joint_max = joint_inputs(defaults["joint_max"])
+                # 単軸動作で動かす軸（対象軸）、J2・J3 の動作範囲（5° 刻み）、測定中の速度、回転半径の下限（全候補の最大半径に対する比。伸ばし切り・縮こまりを避ける）
+                with ui.column().classes("w-full").bind_visibility_from(mode, "value", value="calib_axis"):
+                    with ui.row().classes("items-center"):
+                        ui.label("対象軸")
+                        sweep_axes = [ui.checkbox(f"J{i}", value=True) for i in (1, 2, 3)]
+                    with ui.grid(columns=3).classes("w-full"):
+                        sweep_range = ui.number("動作範囲 [deg]", value=60, min=5, step=5, precision=0).props('hint="J2・J3。5 の倍数"')
+                        sweep_vel = ui.number("測定速度 [deg/s]", value=10, min=0.1)
+                        radius_ratio = ui.number("回転半径の下限", value=0.7, min=0, max=1, step=0.05).props('hint="最大半径との比"')
 
             # 追従のターゲットの動き。目標位置の先端姿勢から動き出し、姿勢はそのままで位置だけが動く。追いついた後も追従時間まで追い続ける
             with ui.card().classes("w-full").bind_visibility_from(mode, "value", value="rmp_track"):
@@ -160,12 +176,12 @@ async def index(request: Request):
             async def example_obstacle():
                 p = [(await client.post("/fk", json={"angles": [n.value for n in inputs]})).json()["position"] for inputs in (start, goal)]
                 obstacles_text.value = json.dumps([{"type": "sphere", "name": "ball", "center": [round((a + b) / 2000, 3) for a, b in zip(*p)], "radius": 0.06}], indent=1)
-            with ui.card().classes("w-full").bind_visibility_from(mode, "value", backward=lambda m: m in ("rmp", "rmp_path", "rmp_track", "calib")):
+            with ui.card().classes("w-full").bind_visibility_from(mode, "value", backward=lambda m: m in ("rmp", "rmp_path", "rmp_track", "calib", "calib_axis")):
                 ui.label("障害物").classes("text-lg font-bold")
                 if obstacles_res.status_code == 404:
                     ui.label("robot-viser-app の衝突判定が無効です（COLLISION=1 docker compose up -d で起動すると使えます）").classes("text-sm text-orange-700")
                 else:
-                    with ui.row().classes("items-center").bind_visibility_from(mode, "value", backward=lambda m: m != "calib"):
+                    with ui.row().classes("items-center").bind_visibility_from(mode, "value", backward=lambda m: m not in ("calib", "calib_axis")):
                         avoid = ui.checkbox("障害物を避ける")
                         avoid_distance = ui.number("影響距離 [mm]", value=100, min=1).classes("w-32")
                     obstacles_text = ui.textarea("障害物（JSON。座標は base_link 基準 [m]）", value=json.dumps(obstacles_res.json()["obstacles"], indent=1)).props("rows=6").classes("w-full font-mono text-xs")
@@ -206,9 +222,34 @@ async def index(request: Request):
                 (await viser_api.post("/shapes", json={"shapes": shapes})).raise_for_status()
                 ui.notify(f"測定点 {r['num_measure']} 点・経由点 {r['num_via']} 点、合計動作時間 {r['duration_sec']:.1f} 秒の測定動作を生成しました")
 
+            # 単軸動作を生成する。測定動作と同じく、画面の障害物を先に送る
+            async def generate_calib_axis():
+                if obstacles_res.status_code == 404: return ui.notify("単軸動作の干渉チェックには robot-viser-app の衝突判定が必要です（COLLISION=1 docker compose up -d で起動してください）", type="negative", multi_line=True)
+                if not await send_obstacles(): return
+                req = {"tracker": [n.value for n in tracker], "target_offset": [n.value for n in target_offset], "target_dir": [n.value for n in target_dir], "cone": cone.value, "margin": margin.value,
+                       "joint_min": [n.value for n in joint_min], "joint_max": [n.value for n in joint_max], "max_vel": [n.value for n in max_vel], "max_acc": [n.value for n in max_acc], "dt": dt.value,
+                       "axes": [i for i, b in zip((1, 2, 3), sweep_axes) if b.value], "sweep_range": int(sweep_range.value), "sweep_vel": sweep_vel.value, "radius_ratio": radius_ratio.value}
+                notification = ui.notification("単軸動作を生成中…", spinner=True, timeout=None)
+                res = await client.post("/calib/axis", json=req, timeout=None)
+                notification.dismiss()
+                if res.status_code == 422: return ui.notify(str(res.json()["detail"]), type="negative", multi_line=True)
+                res.raise_for_status()
+                r = res.json()
+                state["csv"], state["points_csv"] = r["trajectory_csv"], r["points_csv"]
+                show_chart(r["trajectory_csv"])
+                # 確認用に、トラッカー（球）と測定区間ごとのターゲットの軌跡（J1: 赤、J2: 緑、J3: 青の線）を robot-viser に描く
+                colors = {1: "#ff0000", 2: "#00aa44", 3: "#0060ff"}
+                shapes = [{"name": "tracker", "type": "sphere", **dict(zip("xyz", req["tracker"])), "size": 60, "color": "#0080ff"}]
+                shapes += [{"name": f"trace{k}_{i}", "type": "line", **dict(zip("xyz", a)), **dict(zip(("x2", "y2", "z2"), b)), "size": 4, "color": colors[tr["axis"]]}
+                           for k, tr in enumerate(r["traces"]) for i, (a, b) in enumerate(zip(tr["positions"], tr["positions"][1:]))]
+                (await viser_api.post("/shapes", json={"shapes": shapes})).raise_for_status()
+                radii = "・".join(f"J{k} {v:.0f} mm" for k, v in r["radii"].items())
+                ui.notify(f"測定区間 {r['num_measure']} 個、合計動作時間 {r['duration_sec']:.1f} 秒の単軸動作を生成しました（回転半径 {radii}）", multi_line=True)
+
             # 生成した軌道をグラフで確認し、robot-viser での再生や CSV 保存に使う
             async def generate():
                 if mode.value == "calib": return await generate_calib()
+                if mode.value == "calib_axis": return await generate_calib_axis()
                 req = {"mode": mode.value, "start": [n.value for n in start], "via": [[n.value for n in v] for v in vias], "goal": [n.value for n in goal], "blend": blend.value, "max_vel": [n.value for n in max_vel],
                        "max_acc": [n.value for n in max_acc], "lin_vel": lin_vel.value, "lin_acc": lin_acc.value, "rot_vel": rot_vel.value, "rot_acc": rot_acc.value,
                        "dt": dt.value, "duration": duration.value, "track_motion": track_motion.value, "track_speed": track_speed.value, "track_dir": [n.value for n in track_dir],
@@ -242,7 +283,7 @@ async def index(request: Request):
                 with ui.row():
                     ui.button("生成", on_click=generate)
                     ui.button("再生", on_click=play).bind_enabled_from(state, "csv", backward=bool)
-                    # 測定動作は全ポイント（no,label,joint1..6）の CSV を保存する
+                    # 測定動作は全ポイント（no,label,joint1..6）、単軸動作は全動作（no,label,axis,start_joint1..6,end_joint1..6）の CSV を保存する
                     ui.button("CSV 保存", on_click=lambda: ui.download.content(state["points_csv"] or state["csv"], f"{mode.value}_{datetime.now():%Y%m%d_%H%M%S}.csv")).props("outline").bind_enabled_from(state, "csv", backward=bool)
                 chart = ui.echart({"tooltip": {"trigger": "axis"}, "legend": {"top": 0}, "grid": {"left": 40, "right": 10, "top": 50, "bottom": 40},
                                    "xAxis": {"type": "value", "name": "t [s]", "nameLocation": "middle", "nameGap": 25}, "yAxis": {"type": "value", "name": "deg"},

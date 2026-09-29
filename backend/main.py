@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
-from backend.calib import plan_calib
+from backend.calib import plan_calib, plan_calib_axis
 from backend.planner import arm, plan_lin, plan_ptp, tcp_pose
 from backend.rmp import plan_rmp, plan_rmp_path, plan_rmp_track, track_target_path
 
@@ -110,10 +110,43 @@ def post_calib(req: CalibRequest):
             "num_measure": sum(p["label"] == "measure" for p in r["points"]), "num_via": sum(p["label"] == "via" for p in r["points"])}
 
 
-# 選べる動作モードと既定の設定を返す（calib は /calib で作る測定動作）
+# J1・J2・J3 を 1 軸ずつ連続で動かす校正動作の生成条件。target_dir の既定はフランジ面と平行（tool0 の x 軸）。axes は動かす軸
+# sweep_range は J2・J3 の動作範囲、sweep_vel は測定中の動かす軸の速度 [deg/s]。radius_ratio は回転半径の下限（全候補の最大の何倍以上か）。J1 の 30° ×5 区間・重なり 5° は固定
+class CalibAxisRequest(BaseModel):
+    tracker: Vec3 = [0.0, 2500.0, 800.0]
+    target_offset: Vec3 = [0.0, 0.0, 0.0]
+    target_dir: Vec3 = [1.0, 0.0, 0.0]
+    cone: float = Field(30.0, gt=0, le=90)
+    joint_min: Joints = DEFAULTS["joint_min"]
+    joint_max: Joints = DEFAULTS["joint_max"]
+    margin: float = Field(10.0, ge=0)
+    max_vel: Joints = DEFAULTS["max_vel"]
+    max_acc: Joints = DEFAULTS["max_acc"]
+    dt: float = Field(DEFAULTS["dt"], gt=0)
+    seed: int = 0
+    axes: list[Literal[1, 2, 3]] = Field([1, 2, 3], min_length=1)
+    sweep_range: int = Field(60, gt=0, multiple_of=5)
+    sweep_vel: float = Field(10.0, gt=0)
+    radius_ratio: float = Field(0.7, ge=0, le=1)
+
+
+# 校正動作を生成し、1 行 = 1 動作（label: move / measure、measure は動かす軸 axis）で始点・終点の関節角度を並べた CSV（no,label,axis,start_joint1..6,end_joint1..6）と、
+# PTP でつないだ再生用の軌道 CSV（t,joint1..joint6）を返す。関節角度はすべて 5 の倍数なので整数で書く。segments・traces・radii は画面での表示用
+@app.post("/calib/axis")
+def post_calib_axis(req: CalibAxisRequest):
+    r = plan_calib_axis(req.tracker, req.target_offset, req.target_dir, req.cone, req.joint_min, req.joint_max, req.margin, req.max_vel, req.max_acc, req.dt, req.seed,
+                        req.axes, req.sweep_range, req.sweep_vel, req.radius_ratio)
+    header = "no,label,axis," + ",".join(f"{k}_joint{i}" for k in ("start", "end") for i in range(1, 7))
+    points_csv = "\n".join([header, *(f"{i},{s['label']},{s['axis'] or ''}," + ",".join(str(round(a)) for a in s["start"] + s["end"]) for i, s in enumerate(r["segments"]))]) + "\n"
+    trajectory_csv = "\n".join(["t," + ",".join(f"joint{i}" for i in range(1, 7)), *(f"{t:.4f}," + ",".join(f"{a:.6f}" for a in q) for t, q in zip(r["times"], r["angles"]))]) + "\n"
+    return {"segments": r["segments"], "traces": r["traces"], "radii": r["radii"], "points_csv": points_csv, "trajectory_csv": trajectory_csv, "duration_sec": r["times"][-1],
+            "num_measure": sum(s["label"] == "measure" for s in r["segments"])}
+
+
+# 選べる動作モードと既定の設定を返す（calib は /calib で作る測定動作、calib_axis は /calib/axis で作る単軸動作）
 @app.get("/modes")
 def get_modes():
-    return {"modes": ["ptp", "lin", "rmp", "rmp_path", "rmp_track", "calib"], "defaults": DEFAULTS}
+    return {"modes": ["ptp", "lin", "rmp", "rmp_path", "rmp_track", "calib", "calib_axis"], "defaults": DEFAULTS}
 
 
 # 関節角度 [deg] での先端（tool0）の位置 [mm] と姿勢 roll / pitch / yaw [deg] を返す

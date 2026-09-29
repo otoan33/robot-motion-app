@@ -254,3 +254,133 @@ def plan_calib(num_points, tracker, target_offset, target_dir, cone, area, joint
         angles += qs[1:]
     points = [{"label": label, "angles": q.tolist(), "position": ((c.poses(q[None])[1][0] if p is None else p) * 1000).tolist()} for label, q, p in rows]
     return {"points": points, "times": times, "angles": angles}
+
+
+# 各可動関節の回転軸（その関節の座標系）
+AXES = [a for _, a in arm.joints if a is not None]
+# J1 動作: 30° の連続動作を 5 区間、25° ずつずらして並べる（隣の区間と 5° 重なり、全体で 130°）
+J1_SPAN, J1_COUNT, J1_STEP = 30, 5, 25
+
+
+# 関節角度 Q (K,6) [deg] での、関節 j の回転軸からターゲットまでの距離（回転半径）(K,) [m]
+def radius(c: Calib, Q, j: int) -> np.ndarray:
+    T, F = arm.forward_many(np.radians(Q))
+    u, v = F[:, j + 1, :3, :3] @ AXES[j], T[:, :3, :3] @ c.offset + T[:, :3, 3] - F[:, j + 1, :3, 3]
+    return np.linalg.norm(v - (v * u).sum(1, keepdims=True) * u, axis=1)
+
+
+# 関節角度 Q (K,6) [deg] で、ミラーの向きとトラッカー方向の内積が最大になる J6 [deg]（5° に丸め、可動範囲に入れば ±360° を選ぶ）
+# ミラーは tool0 の xy 面内にあり J6 はその法線（tool0 z）まわりに回すので、トラッカー方向を tool0 の xy 面へ射影した向きに合わせる
+def aim_j6(c: Calib, Q) -> np.ndarray:
+    Q = np.array(Q, float)
+    # ターゲットが J6 の軸からずれていると J6 でターゲットの位置も変わるので、もう一度求め直す
+    for _ in range(2):
+        T, F = arm.forward_many(np.radians(Q))
+        R = T[:, :3, :3]
+        t = np.einsum("kji,kj->ki", R, c.tracker - R @ c.offset - T[:, :3, 3])
+        s = np.sign(np.einsum("kij,j,ki->k", F[:, 6, :3, :3], AXES[5], R[:, :, 2]))
+        Q[:, 5] += s * np.degrees(np.arctan2(t[:, 1], t[:, 0]) - np.arctan2(c.dir[1], c.dir[0]))
+    J6 = np.round(((Q[:, 5] + 180) % 360 - 180) / 5) * 5
+    return np.where(J6 > c.hi[5], J6 - 360, np.where(J6 < c.lo[5], J6 + 360, J6))
+
+
+# 格子の候補（区間の始点 S (K,m,6) から関節 j を span [deg] 動かす m 区間の動作）から、回転半径 R (K,) が全候補の最大の ratio 倍以上で、
+# 2° ごとの姿勢が全区間で可動範囲内・干渉なし・ミラーが許容角内の候補を残し、許容角までの最小余裕が大きい順に、1° ごとの光路の遮蔽・区間の干渉・
+# 全軸 0° から始点と終点へ直接行けるかを確かめ、最初に成立した候補の区間の列 [(始点, 終点), ...] を返す（なければ None）
+def choose(c: Calib, S, j: int, span: int, R, ratio: float):
+    home, e, (K, m) = np.zeros(6), np.eye(6)[j], S.shape[:2]
+    # 始点が干渉しない候補に絞る（干渉しない始点は経由点の経路網に使う）
+    free = (c.clearance(c.poses(S.reshape(-1, 6))[0]) >= 0).reshape(K, m)
+    c.free_poses += list(S[free])
+    idx, T = np.flatnonzero(free.all(1) & (R >= ratio * R.max())), np.arange(0, span + 1, 2)
+    # 区間の途中を 2° ごとに調べ、全姿勢でのミラーの向きの許容角までの余裕の最小値を求める（メモリを抑えるため 200 候補ずつ）
+    gap = np.full(len(idx), -np.inf)
+    for b in range(0, len(idx), 200):
+        Q = (S[idx[b:b + 200], :, None] + T[:, None] * e).reshape(-1, 6)
+        P, X, N = c.poses(Q)
+        d = c.tracker - X
+        g = c.cone - np.arccos(np.clip((N * d).sum(1) / np.linalg.norm(d, axis=1), -1, 1))
+        gap[b:b + 200] = np.where(np.all((Q >= c.lo) & (Q <= c.hi), 1) & (c.clearance(P) >= 0), g, -np.inf).reshape(-1, m * len(T)).min(1)
+    for i in idx[np.argsort(-gap)][np.sort(-gap) <= 0]:
+        segs = [(s, s + span * e) for s in S[i]]
+        P, X, _ = c.poses(np.array([s + t * e for s in S[i] for t in range(span + 1)]))
+        if not any(c.blocked(p, x) for p, x in zip(P, X)) and all(c.free(a, b) and c.free(home, a) and c.free(home, b) for a, b in segs): return segs
+    return None
+
+
+# J1・J2・J3 を 1 軸ずつ連続で動かす校正動作を作る。長さ [mm]・角度 [deg]。関節角度はすべて 5 の倍数
+# J2・J3 動作: J4=J5=0 で J2（J3）を sweep_range 動かす。J1 は共通で、J2・J3 の回転軸がトラッカーを向くよう腕の面を横に向ける
+# J1 動作: フランジ下向き（tool0 z が鉛直下向き）・J4=0 で J1 を 30° ×5 区間動かす。J2〜J5 は共通で、J6 だけ区間ごとにミラーをトラッカーへ向け直す
+# 返り値: 動作の列（label: move / measure、axis、始点・終点の関節角度とターゲット位置 [mm]）、再生用の軌道、measure 区間のターゲット軌跡（1° ごと [mm]）、各軸の回転半径 [mm]
+def plan_calib_axis(tracker, target_offset, target_dir, cone, joint_min, joint_max, margin, max_vel, max_acc, dt, seed=0, axes=(1, 2, 3), sweep_range=60, sweep_vel=10.0, radius_ratio=0.7) -> dict:
+    c, home = Calib(tracker, target_offset, target_dir, cone, None, joint_min, joint_max, margin, max_vel, max_acc, seed), np.zeros(6)
+    if c.clearance(c.poses(home[None])[0])[0] < 0: raise ValueError("全軸 0° の姿勢が障害物と干渉しています")
+    c.free_poses, measures, radii = [], [], {}
+    # 格子は可動範囲内の 5 の倍数。トラッカーの方位角 phi は base_link の x 軸から（全軸 0° の腕は phi=90° の向き）
+    lo, hi = np.ceil(c.lo / 5) * 5, np.floor(c.hi / 5) * 5
+    grid = lambda i, span=0: np.arange(lo[i], hi[i] - span + 1, 5)
+    r5 = lambda v: float(np.round(v / 5) * 5)
+    phi = np.degrees(np.arctan2(c.tracker[1], c.tracker[0]))
+    fail = "（トラッカーの位置・許容角・障害物・回転半径の下限を見直してください）"
+
+    if 1 in axes:
+        # J2・J3 の格子で、フランジが下を向く J5 = -90 - J2 - J3（J2・J3・J5 は同じ向きの軸）が可動範囲内のもの
+        J2, J3 = (v.ravel() for v in np.meshgrid(grid(1), grid(2), indexing="ij"))
+        ok = (-90 - J2 - J3 >= lo[4]) & (-90 - J2 - J3 <= hi[4])
+        base = np.zeros((ok.sum(), 6))
+        base[:, 1], base[:, 2], base[:, 4] = J2[ok], J3[ok], -90 - J2[ok] - J3[ok]
+        # J1 の開始 a は、130° の範囲の中央で腕がトラッカーを向く値から近い順に試す
+        width, e0 = J1_STEP * (J1_COUNT - 1) + J1_SPAN, np.eye(6)[0]
+        for a in sorted(grid(0, width), key=lambda a: abs(a - r5(phi - 90 - width / 2))):
+            S = np.repeat(base[:, None], J1_COUNT, 1)
+            S[:, :, 0] = a + J1_STEP * np.arange(J1_COUNT)
+            # 区間ごとの J6 は、区間の中央でミラーがトラッカーを向く値
+            S[:, :, 5] = aim_j6(c, (S + J1_SPAN / 2 * e0).reshape(-1, 6)).reshape(len(S), J1_COUNT)
+            R = radius(c, S[:, 0], 0)
+            if (segs := choose(c, S, 0, J1_SPAN, R, radius_ratio)) is not None: break
+        else: raise ValueError("J1 動作の姿勢が見つかりません" + fail)
+        measures += [(1, a, b) for a, b in segs]
+        radii[1] = float(radius(c, segs[0][0][None], 0)[0] * 1000)
+
+    if {2, 3} & set(axes):
+        # J1 の目安: 腕の面をトラッカーに対して横向きにし、ターゲットの横のずれ（全軸 0° での水平距離 rho）の分だけトラッカー側へ回す。腕の左右 2 通り
+        X0 = c.poses(home[None])[1][0]
+        g, f = np.degrees(np.arctan2(np.linalg.norm(X0[:2]), np.linalg.norm(c.tracker[:2]))), r5(phi - 90)
+        cands = [(abs(f + v - r5(f - 90 + g)), f + v) for v in range(-85, 0, 5)] + [(abs(f + v - r5(f + 90 - g)), f + v) for v in range(5, 90, 5)]
+        for _, J1 in sorted(x for x in cands if lo[0] <= x[1] <= hi[0]):
+            found = {}
+            for ax in (2, 3):
+                if ax not in axes: continue
+                # J2 動作は (J3, J2 の開始)、J3 動作は (J2, J3 の開始) の格子。J6 は動作の中央でミラーがトラッカーを向く値
+                j, o = ax - 1, 4 - ax
+                V, W = (v.ravel() for v in np.meshgrid(grid(o), grid(j, sweep_range), indexing="ij"))
+                S = np.zeros((len(V), 1, 6))
+                S[:, 0, 0], S[:, 0, o], S[:, 0, j] = J1, V, W
+                S[:, 0, 5] = aim_j6(c, S[:, 0] + sweep_range / 2 * np.eye(6)[j])
+                if (segs := choose(c, S, j, sweep_range, radius(c, S[:, 0], j), radius_ratio)) is None: break
+                found[ax] = segs[0]
+            else: break
+        else: raise ValueError("J2・J3 動作の姿勢が見つかりません" + fail)
+        measures += [(ax, *found[ax]) for ax in (2, 3) if ax in found]
+        radii.update({ax: float(radius(c, found[ax][0][None], ax - 1)[0] * 1000) for ax in found})
+
+    # 全軸 0° → 各測定区間 → 全軸 0° の順に PTP でつなぎ、干渉する移動には経由点（格子探索で見つかった干渉しない姿勢の経路網）を入れる
+    c.roadmap([home, *(c.free_poses[i] for i in c.rng.permutation(len(c.free_poses))[:1000]), *(q for _, a, b in measures for q in (a, b))])
+    rows, cur = [], home
+    for ax, a, b in measures + [(None, home, home)]:
+        path = [cur, *c.connect(cur, a), a]
+        rows += [("move", None, p, q) for p, q in zip(path[:-1], path[1:]) if np.any(p != q)]
+        if ax is not None: rows.append(("measure", ax, a, b)); cur = b
+
+    # 再生用の軌道。測定区間は、動かす軸の速度を sweep_vel に抑える
+    times, angles = [0.0], [home.tolist()]
+    for label, ax, a, b in rows:
+        vel = np.array(max_vel, float)
+        if label == "measure": vel[ax - 1] = min(vel[ax - 1], sweep_vel)
+        ts, qs = plan_ptp(a, b, vel, max_acc, dt)
+        times += [times[-1] + t for t in ts[1:]]
+        angles += qs[1:]
+    pos = lambda q: (c.poses(np.array(q)[None])[1][0] * 1000).tolist()
+    segments = [{"label": label, "axis": ax, "start": (a + 0.0).tolist(), "end": (b + 0.0).tolist(), "start_position": pos(a), "end_position": pos(b)} for label, ax, a, b in rows]
+    traces = [{"axis": ax, "positions": (c.poses(np.array([a + t * np.sign(b - a) for t in range(int(np.abs(b - a).max()) + 1)]))[1] * 1000).tolist()} for label, ax, a, b in rows if label == "measure"]
+    return {"segments": segments, "times": times, "angles": angles, "traces": traces, "radii": radii}
