@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>測定動作の経由点探索</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=BIZ+UDPGothic:wght@400;700&family=IBM+Plex+Mono:wght@400;500&family=Zen+Kaku+Gothic+New:wght@500;700&display=swap">
+<style>
+:root {
+  --bg: #f4f6f7; --panel: #ffffff; --ink: #18222b; --muted: #5b6873; --rule: #d3dbe0;
+  --accent: #1c6d8c; --accent-tint: #dcecf2; --ng: #c2412f; --ng-tint: #f6dfdb; --ok: #2e7d53; --node: #93a2ad;
+  --f-body: "BIZ UDPGothic", "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+  --f-head: "Zen Kaku Gothic New", "Hiragino Sans", "Yu Gothic UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #11181d; --panel: #18222a; --ink: #e2e9ee; --muted: #9aa8b3; --rule: #2d3a44;
+    --accent: #5fb4d4; --accent-tint: #1b3a47; --ng: #ec7a66; --ng-tint: #3e2622; --ok: #64c58f; --node: #6f7f8b;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #11181d; --panel: #18222a; --ink: #e2e9ee; --muted: #9aa8b3; --rule: #2d3a44;
+  --accent: #5fb4d4; --accent-tint: #1b3a47; --ng: #ec7a66; --ng-tint: #3e2622; --ok: #64c58f; --node: #6f7f8b;
+}
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--f-body); font-size: 16px; line-height: 1.85; }
+.page { max-width: 58rem; margin: 0 auto; padding-inline: 20px; padding-block: 48px 72px; display: grid; gap: 56px; }
+.prose { max-width: 42rem; display: grid; gap: 14px; }
+h1, h2, h3 { font-family: var(--f-head); text-wrap: balance; line-height: 1.35; margin: 0; }
+h1 { font-size: clamp(1.9rem, 4.5vw, 2.6rem); font-weight: 700; }
+h2 { font-size: 1.45rem; font-weight: 700; display: flex; gap: 12px; align-items: baseline; }
+h2 .no { font-family: var(--f-mono); font-size: 0.95rem; color: var(--accent); font-weight: 500; }
+h3 { font-size: 1.08rem; font-weight: 700; }
+p { margin: 0; }
+.eyebrow { font-family: var(--f-mono); font-size: 0.8rem; letter-spacing: 0.06em; color: var(--muted); }
+.lead { font-size: 1.08rem; }
+code { font-family: var(--f-mono); font-size: 0.88em; background: var(--accent-tint); padding: 1px 5px; border-radius: 4px; }
+section { display: grid; gap: 22px; }
+header { display: grid; gap: 16px; }
+
+/* 流れの要約 */
+.flow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; counter-reset: step; }
+.flow li { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px; display: grid; gap: 4px; align-content: start; }
+.flow b { font-family: var(--f-head); font-size: 1.02rem; }
+.flow .when { font-family: var(--f-mono); font-size: 0.78rem; color: var(--muted); letter-spacing: 0.03em; }
+.flow li:nth-child(1) .when { color: var(--ok); }
+.flow li:nth-child(2) .when { color: var(--accent); }
+.flow li:nth-child(3) .when { color: var(--ng); }
+.flow span:last-child { font-size: 0.92rem; color: var(--muted); line-height: 1.7; }
+@media (max-width: 640px) { .flow { grid-template-columns: 1fr; } }
+
+/* 図 */
+figure { margin: 0; display: grid; gap: 10px; }
+.fig-box { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 12px; overflow-x: auto; }
+.fig-box svg { display: block; width: 100%; height: auto; min-width: 560px; }
+figcaption { font-size: 0.9rem; color: var(--muted); line-height: 1.7; max-width: 46rem; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 20px; font-size: 0.85rem; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 8px; }
+.legend i { display: inline-block; width: 26px; height: 0; border-top: 2.5px solid; }
+.legend .l-ok { border-color: var(--ok); }
+.legend .l-via { border-color: var(--accent); border-top-width: 3.5px; }
+.legend .l-ng { border-color: var(--ng); border-top-style: dashed; }
+.legend .l-node { width: 8px; height: 8px; border: 0; border-radius: 50%; background: var(--node); }
+
+/* SVG の色（テーマに追従） */
+svg text { font-family: var(--f-body); fill: var(--ink); font-size: 13px; }
+svg .t-muted { fill: var(--muted); font-size: 12px; }
+svg .t-ng { fill: var(--ng); font-size: 12px; }
+svg .t-ok { fill: var(--ok); font-size: 12px; }
+svg .t-acc { fill: var(--accent); font-size: 12px; }
+svg .t-head { font-family: var(--f-head); font-weight: 700; font-size: 14px; }
+svg .t-mono { font-family: var(--f-mono); font-size: 12px; fill: var(--muted); }
+.s-ok { stroke: var(--ok); fill: none; stroke-width: 2.2; }
+.s-via { stroke: var(--accent); fill: none; stroke-width: 3.2; }
+.s-ng { stroke: var(--ng); fill: none; stroke-width: 2; stroke-dasharray: 6 5; }
+.s-edge { stroke: var(--node); fill: none; stroke-width: 1.2; stroke-dasharray: 3 4; }
+.s-ink { stroke: var(--ink); fill: none; stroke-width: 1.4; }
+.s-muted { stroke: var(--muted); fill: none; stroke-width: 1.2; }
+.s-link { stroke: var(--rule); fill: none; stroke-width: 9; stroke-linecap: round; }
+.f-obst { fill: var(--ng-tint); stroke: var(--ng); stroke-width: 1.4; stroke-dasharray: 4 3; }
+.f-node { fill: var(--node); }
+.f-meas { fill: var(--accent); }
+.f-home { fill: var(--ink); }
+.f-via { fill: var(--panel); stroke: var(--accent); stroke-width: 3; }
+.f-joint { fill: var(--panel); stroke: var(--ink); stroke-width: 1.6; }
+.f-joint-hl { fill: var(--accent); stroke: var(--accent); stroke-width: 1.6; }
+.f-sphere { fill: var(--accent-tint); stroke: var(--accent); stroke-width: 1.4; }
+.f-ink { fill: var(--ink); }
+.f-ok { fill: var(--ok); }
+.f-acc { fill: var(--accent); }
+.f-ng { fill: var(--ng); }
+.f-panel { fill: var(--panel); }
+
+/* 表 */
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.92rem; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-family: var(--f-head); font-weight: 700; color: var(--muted); font-size: 0.82rem; letter-spacing: 0.04em; }
+td:nth-child(2) { font-variant-numeric: tabular-nums; }
+
+ul.plain { margin: 0; padding-left: 1.2em; display: grid; gap: 10px; }
+.formula { font-family: var(--f-mono); font-size: 0.95rem; background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 12px 16px; overflow-x: auto; white-space: nowrap; }
+.formula .c { color: var(--muted); }
+.two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; align-items: start; }
+@media (max-width: 760px) { .two { grid-template-columns: 1fr; } }
+footer { font-size: 0.85rem; color: var(--muted); border-top: 1px solid var(--rule); padding-top: 18px; display: grid; gap: 6px; }
+</style>
+</head>
+<body>
+
+<div class="page">
+  <header>
+    <div class="eyebrow">robot-motion-app ／ 測定動作（レーザートラッカー校正）／ backend/calib.py</div>
+    <h1>測定動作の経由点探索</h1>
+    <p class="lead prose">測定点を回る順番を決めたあと、隣り合う 2 点を結ぶ PTP の区間ごとに経由点を入れます。まっすぐ動かして干渉しない区間はそのままにし、干渉する区間だけ、干渉しない姿勢を集めた経路網の上で最短経路を探して、その途中の姿勢を経由点にします。</p>
+    <ol class="flow">
+      <li><span class="when">まず</span><b>直接行けるか調べる</b><span>PTP の直線が区間全体で干渉しないことを、取りこぼしなく確かめる</span></li>
+      <li><span class="when">干渉するとき</span><b>経路網で回り道を探す</b><span>動作時間の合計が最短の経路を探し、干渉する辺を外しては探し直す</span></li>
+      <li><span class="when">見つからないとき</span><b>全軸 0° を経由する</b><span>どの測定点も 0° から直接行けるので、必ずつながる</span></li>
+    </ol>
+  </header>
+
+  <!-- 全体像 -->
+  <section>
+    <h2>全体像</h2>
+    <figure>
+      <div class="fig-box">
+        <svg viewBox="0 0 720 360" role="img" aria-label="関節空間の模式図。全軸 0° から測定点 P1 から P5 を回って 0° に戻る。P2 から P3 への直線は干渉する姿勢の領域を通るため、経路網の節点 2 つを経由点にして回り込む。ほかの区間は直接の PTP でつながる。">
+          <defs>
+            <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ok"/></marker>
+            <marker id="ah-via" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-acc"/></marker>
+          </defs>
+          <text x="20" y="28" class="t-muted">関節空間（6 次元を 2 次元にした模式図）</text>
+          <!-- 干渉する姿勢の領域 -->
+          <ellipse cx="380" cy="180" rx="60" ry="50" class="f-obst"/>
+          <text x="380" y="176" text-anchor="middle" class="t-ng">干渉する</text>
+          <text x="380" y="192" text-anchor="middle" class="t-ng">姿勢</text>
+          <!-- 経路網（干渉しない姿勢と辺） -->
+          <g>
+            <line x1="390" y1="258" x2="350" y2="322" class="s-edge"/>
+            <line x1="390" y1="258" x2="430" y2="322" class="s-edge"/>
+            <line x1="350" y1="322" x2="260" y2="322" class="s-edge"/>
+            <line x1="260" y1="322" x2="240" y2="220" class="s-edge"/>
+            <line x1="430" y1="322" x2="560" y2="250" class="s-edge"/>
+            <line x1="475" y1="205" x2="560" y2="150" class="s-edge"/>
+            <line x1="330" y1="100" x2="420" y2="80" class="s-edge"/>
+            <line x1="420" y1="80" x2="560" y2="150" class="s-edge"/>
+            <circle cx="240" cy="220" r="3.5" class="f-node"/>
+            <circle cx="260" cy="322" r="3.5" class="f-node"/>
+            <circle cx="350" cy="322" r="3.5" class="f-node"/>
+            <circle cx="430" cy="322" r="3.5" class="f-node"/>
+            <circle cx="560" cy="250" r="3.5" class="f-node"/>
+            <circle cx="560" cy="150" r="3.5" class="f-node"/>
+            <circle cx="330" cy="100" r="3.5" class="f-node"/>
+            <circle cx="420" cy="80" r="3.5" class="f-node"/>
+          </g>
+          <!-- 直接つながる区間 -->
+          <line x1="100" y1="300" x2="165" y2="170" class="s-ok" marker-end="url(#ah-ok)"/>
+          <line x1="170" y1="160" x2="292" y2="244" class="s-ok" marker-end="url(#ah-ok)"/>
+          <line x1="470" y1="120" x2="608" y2="93" class="s-ok" marker-end="url(#ah-ok)"/>
+          <line x1="620" y1="90" x2="629" y2="268" class="s-ok" marker-end="url(#ah-ok)"/>
+          <line x1="630" y1="280" x2="112" y2="300" class="s-ok" marker-end="url(#ah-ok)"/>
+          <!-- 直接は干渉する区間と、経由点での回り道 -->
+          <line x1="300" y1="250" x2="470" y2="120" class="s-ng"/>
+          <text x="432" y="114" text-anchor="end" class="t-ng">直接は干渉</text>
+          <polyline points="300,250 390,258 475,205 471,132" class="s-via" marker-end="url(#ah-via)"/>
+          <circle cx="390" cy="258" r="7" class="f-via"/>
+          <circle cx="475" cy="205" r="7" class="f-via"/>
+          <text x="390" y="284" text-anchor="middle" class="t-acc">経由点</text>
+          <text x="500" y="236" class="t-acc">経由点</text>
+          <!-- 測定点と全軸 0° -->
+          <rect x="93" y="293" width="14" height="14" class="f-home" transform="rotate(45 100 300)"/>
+          <text x="100" y="330" text-anchor="middle">全軸 0°</text>
+          <circle cx="170" cy="160" r="6.5" class="f-meas"/><text x="152" y="150" text-anchor="end">P1</text>
+          <circle cx="300" cy="250" r="6.5" class="f-meas"/><text x="290" y="272" text-anchor="end">P2</text>
+          <circle cx="470" cy="120" r="6.5" class="f-meas"/><text x="470" y="104" text-anchor="middle">P3</text>
+          <circle cx="620" cy="90" r="6.5" class="f-meas"/><text x="620" y="74" text-anchor="middle">P4</text>
+          <circle cx="630" cy="280" r="6.5" class="f-meas"/><text x="648" y="285">P5</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i class="l-ok"></i>直接の PTP（干渉なし）</span>
+        <span><i class="l-ng"></i>直接の PTP（干渉する）</span>
+        <span><i class="l-via"></i>経由点を通る回り道</span>
+        <span><i class="l-node"></i>経路網の節点（干渉しない姿勢）</span>
+      </div>
+      <figcaption>順番（0° → P1 → … → P5 → 0°）は、直接の PTP の動作時間で先に決めてあります。経由点を入れるのはそのあとで、干渉する区間（ここでは P2 → P3）だけが回り道になります。100 点・床と台ありで試したときは、経由点が必要になったのは 3 か所でした。</figcaption>
+    </figure>
+  </section>
+
+  <!-- 1. 区間の干渉チェック -->
+  <section>
+    <h2><span class="no">1</span>区間が干渉しないかを調べる <code>free(a, b)</code></h2>
+    <div class="prose">
+      <p>a → b の PTP は、関節空間の直線 <code>q(s) = a + s(b − a)</code>（s は 0 → 1）です。途中の数点だけを調べると、点と点の間で細い障害物をすり抜けて見逃すことがあります。そこで、ロボットが動ける速さの上限から「この間は干渉しない」と言い切れる範囲を求め、言い切れない間だけを細かく調べます。</p>
+    </div>
+
+    <div class="two">
+      <div class="prose">
+        <h3>球の中心が動く量の上限 reach</h3>
+        <p>干渉は、ロボットを覆う近似球どうしの距離と、近似球と障害物の距離で調べます。関節 i が Δq だけ回ったとき、その先にある球の中心は、関節 i を中心とする円弧の上を動きます。その長さは「関節 i から球までの距離 × Δq」以下です。</p>
+        <p>関節 i から球までの距離は、関節間の距離の合計に、球の取り付け位置のずれを足した値を超えません（三角不等式）。これを関節 i より先にあるすべての球で求め、いちばん大きい値を <code>reach[i]</code> とします。</p>
+      </div>
+      <figure>
+        <div class="fig-box">
+          <svg viewBox="0 0 520 250" role="img" aria-label="関節 3 が Δq 回ると、リンク 4 に付いた球の中心は関節 3 を中心とする円弧の上を動く。その移動量は reach3 × Δq3 以下で、reach3 は関節 3 から 4 までの距離と球のずれの和。" style="min-width:420px">
+            <defs>
+              <marker id="ah-acc2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-acc"/></marker>
+              <marker id="ah-dim" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+            </defs>
+            <!-- アーム -->
+            <rect x="30" y="206" width="60" height="18" rx="3" class="f-node"/>
+            <polyline points="60,200 60,140 170,80 330,80 460,80 500,80" class="s-link"/>
+            <circle cx="60" cy="200" r="9" class="f-joint"/>
+            <circle cx="60" cy="140" r="9" class="f-joint"/>
+            <circle cx="170" cy="80" r="10" class="f-joint-hl"/>
+            <circle cx="330" cy="80" r="9" class="f-joint"/>
+            <circle cx="460" cy="80" r="9" class="f-joint"/>
+            <text x="170" y="112" text-anchor="middle" class="t-acc">関節 3</text>
+            <text x="330" y="106" text-anchor="middle" class="t-muted">関節 4</text>
+            <!-- 球と、そのずれ -->
+            <circle cx="380" cy="130" r="24" class="f-sphere"/>
+            <circle cx="380" cy="130" r="3" class="f-acc"/>
+            <line x1="330" y1="80" x2="380" y2="130" class="s-muted" stroke-dasharray="3 3"/>
+            <text x="410" y="150" class="t-muted">球（リンク 4）</text>
+            <text x="384" y="100" class="t-muted">球のずれ</text>
+            <!-- 関節間の距離 -->
+            <line x1="172" y1="44" x2="328" y2="44" class="s-ink" marker-start="url(#ah-dim)" marker-end="url(#ah-dim)"/>
+            <line x1="170" y1="36" x2="170" y2="66" class="s-muted"/>
+            <line x1="330" y1="36" x2="330" y2="66" class="s-muted"/>
+            <text x="250" y="34" text-anchor="middle" class="t-muted">関節間の距離</text>
+            <!-- 関節 3 まわりの回転で球の中心が動く弧 -->
+            <line x1="170" y1="80" x2="380" y2="130" class="s-muted" stroke-dasharray="2 4"/>
+            <line x1="170" y1="80" x2="361" y2="177" class="s-muted" stroke-dasharray="2 4"/>
+            <path d="M 380 130 A 215.9 215.9 0 0 1 362.5 175.6" class="s-via" stroke-width="2.4" marker-end="url(#ah-acc2)"/>
+            <text x="250" y="205" class="t-acc">移動 ≤ reach₃ × |Δq₃|</text>
+            <text x="300" y="134" text-anchor="middle" class="t-muted">Δq₃</text>
+          </svg>
+        </div>
+        <figcaption>reach₃ は、関節 3 より先にある球すべてについて「関節間の距離の合計 + 球のずれ」を求めたうちの最大値です（<code>calib.py:96</code>）。</figcaption>
+      </figure>
+    </div>
+
+    <div class="prose">
+      <h3>余裕が縮む速さの上限 D</h3>
+      <p>関節ごとの上限を足すと、s が 0 から 1 まで進む間に、どの球の中心も <code>Σ reach_i·|Δq_i|</code> より多くは動きません。球どうしの距離は両方の球が動くので、余裕（距離 − 半径、障害物では安全距離も引く）が縮む量は次の D 以下になります。</p>
+    </div>
+    <div class="formula">D = 2 × Σᵢ reach[i] × |b[i] − a[i]|　<span class="c">// s あたりに余裕が縮みうる最大量 [m]</span></div>
+
+    <figure>
+      <div class="fig-box">
+        <svg viewBox="0 0 720 310" role="img" aria-label="余裕 c(s) のグラフ。調べた点の間では、両端から傾き D で下がる V 字の下端が最小値の下限になる。下端が 0 以上の間は干渉しないと保証される。0 を下回りうる間だけ中点を足して調べ直すと、分けた両側とも保証できる。">
+          <!-- 軸 -->
+          <line x1="50" y1="30" x2="50" y2="250" class="s-muted"/>
+          <line x1="50" y1="240" x2="700" y2="240" class="s-ink"/>
+          <text x="44" y="244" text-anchor="end" class="t-muted">0</text>
+          <text x="56" y="30" class="t-muted">余裕 c</text>
+          <text x="60" y="262" text-anchor="middle" class="t-mono">s = 0</text>
+          <text x="680" y="262" text-anchor="middle" class="t-mono">s = 1</text>
+          <text x="696" y="232" text-anchor="end" class="t-muted">接触</text>
+          <!-- 実際の余裕 -->
+          <polyline points="60,90 215,120 370,190 447.5,170 525,200 680,110" class="s-ink" stroke-width="2"/>
+          <text x="76" y="76" class="t-muted">実際の余裕 c(s)</text>
+          <!-- 保証できる間（V 字の下端が 0 以上） -->
+          <polyline points="60,90 152.5,182.5 215,120" class="s-ok"/>
+          <polyline points="215,120 327.5,232.5 370,190" class="s-ok"/>
+          <polyline points="525,200 557.5,232.5 680,110" class="s-ok"/>
+          <circle cx="152.5" cy="182.5" r="3" class="f-ok"/>
+          <text x="152.5" y="206" text-anchor="middle" class="t-ok">下限 (c₁ + c₂ − D·Δs) / 2</text>
+          <!-- 保証できない間 → 中点を足す -->
+          <polyline points="370,190 452.5,272.5 525,200" class="s-ng"/>
+          <circle cx="452.5" cy="272.5" r="3" class="f-ng"/>
+          <text x="470" y="290" class="t-ng">0 を下回りうる → 中点を足す</text>
+          <polyline points="370,190 398.75,218.75 447.5,170" class="s-ok"/>
+          <polyline points="447.5,170 501.25,223.75 525,200" class="s-ok"/>
+          <!-- 調べた点 -->
+          <circle cx="60" cy="90" r="4.5" class="f-ink"/>
+          <circle cx="215" cy="120" r="4.5" class="f-ink"/>
+          <circle cx="370" cy="190" r="4.5" class="f-ink"/>
+          <circle cx="525" cy="200" r="4.5" class="f-ink"/>
+          <circle cx="680" cy="110" r="4.5" class="f-ink"/>
+          <circle cx="447.5" cy="170" r="5.5" class="f-via"/>
+          <text x="447.5" y="154" text-anchor="middle" class="t-acc">足した点</text>
+          <!-- 間隔 Δs -->
+          <line x1="215" y1="52" x2="370" y2="52" class="s-muted"/>
+          <line x1="215" y1="46" x2="215" y2="58" class="s-muted"/>
+          <line x1="370" y1="46" x2="370" y2="58" class="s-muted"/>
+          <text x="292.5" y="45" text-anchor="middle" class="t-mono">Δs</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i class="l-ok"></i>下限が 0 以上（干渉しないと保証）</span>
+        <span><i class="l-ng"></i>下限が 0 未満（調べ直す）</span>
+      </div>
+      <figcaption>余裕は s あたり D より速くは縮まないので、2 点 c₁, c₂ の間の最小値は、両端から傾き D で下がる V 字の下端 (c₁ + c₂ − D·Δs) / 2 以上です。c₁ + c₂ ≥ D·Δs なら、その間は干渉しません。</figcaption>
+    </figure>
+
+    <div class="prose">
+      <h3>手順</h3>
+      <ul class="plain">
+        <li>最初は、D に応じて約 5 cm 分の間隔で s を区切り、各点の余裕をまとめて計算します。</li>
+        <li><code>c₁ + c₂ &lt; D·Δs</code> の間にだけ中点を足して計算し、保証できない間がなくなるまで繰り返します。</li>
+        <li>どこかの点で余裕が負になれば「干渉する」、すべての間を保証できれば「干渉しない」と判定します。</li>
+        <li>近似球の位置は robot-viser-app から 1 回だけ取り、あとは手元の順運動学で多くの姿勢をまとめて計算します。HTTP を毎回呼ばないので、区間 1 本の判定は数 ms です。</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 2. 経路網 -->
+  <section>
+    <h2><span class="no">2</span>経路網を作る <code>roadmap</code></h2>
+    <div class="prose">
+      <p>回り道の材料として、干渉しないことがわかっている姿勢を節点にしたグラフを 1 回だけ作ります。辺の重みは関節角度の差ではなく <b>PTP の最短時間</b>（台形速度で、いちばん遅い関節で決まる）なので、見つかる回り道は動作時間の合計が短いものになります。</p>
+      <p>作る時点では、辺が干渉するかは調べません。辺は約 1 万本あり、使うかどうかわからない辺まで調べると重いからです。</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>項目</th><th>内容</th></tr></thead>
+        <tbody>
+          <tr><td>節点</td><td>全軸 0°、測定点の候補を探す途中で見つかった干渉しないランダムな姿勢（最大 1000 個）、測定点の候補（測定点数 × 5）</td></tr>
+          <tr><td>辺</td><td>各節点から、PTP の動作時間が短い 15 個へ（k = 15、向きなし）</td></tr>
+          <tr><td>辺の重み</td><td>PTP の最短時間 [s]（<code>cost</code>）</td></tr>
+          <tr><td>辺の干渉</td><td>使うときに調べ、結果を覚えて使い回す</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 3. lazy PRM -->
+  <section>
+    <h2><span class="no">3</span>回り道を探す <code>connect(a, b)</code></h2>
+    <div class="prose">
+      <p>lazy PRM と呼ばれる方法です。最短経路を先に求め、その経路に含まれる辺だけを調べます。干渉する辺が見つかったら、その辺を外して最短経路を求め直します。</p>
+    </div>
+    <figure>
+      <div class="fig-box">
+        <svg viewBox="0 0 900 300" role="img" aria-label="3 段階の図。1: a から b への直接の PTP は障害物を通るので干渉する。2: 経路網で最短の経路 a, n1, n2, b を求め、辺を順に調べると n1 から n2 が干渉するので外す。3: 探し直すと a, n5, b の経路がすべて干渉せず、n5 が経由点になる。">
+          <defs>
+            <marker id="ah-ok3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ok"/></marker>
+            <marker id="ah-via3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-acc"/></marker>
+          </defs>
+          <!-- 3 枚に共通の経路網。g の translate でずらして並べる -->
+          <g id="p1">
+            <text x="10" y="22" class="t-head">1. 直接の PTP を調べる</text>
+            <ellipse cx="140" cy="150" rx="30" ry="35" class="f-obst"/>
+            <g>
+              <line x1="30" y1="150" x2="90" y2="120" class="s-edge"/><line x1="30" y1="150" x2="80" y2="70" class="s-edge"/><line x1="30" y1="150" x2="140" y2="235" class="s-edge"/>
+              <line x1="90" y1="120" x2="190" y2="180" class="s-edge"/><line x1="90" y1="120" x2="80" y2="70" class="s-edge"/><line x1="80" y1="70" x2="200" y2="70" class="s-edge"/>
+              <line x1="200" y1="70" x2="250" y2="150" class="s-edge"/><line x1="190" y1="180" x2="250" y2="150" class="s-edge"/><line x1="140" y1="235" x2="250" y2="150" class="s-edge"/><line x1="190" y1="180" x2="200" y2="70" class="s-edge"/>
+              <circle cx="90" cy="120" r="3.5" class="f-node"/><circle cx="80" cy="70" r="3.5" class="f-node"/><circle cx="200" cy="70" r="3.5" class="f-node"/><circle cx="190" cy="180" r="3.5" class="f-node"/><circle cx="140" cy="235" r="3.5" class="f-node"/>
+            </g>
+            <line x1="30" y1="150" x2="250" y2="150" class="s-ng"/>
+            <text x="140" y="154" text-anchor="middle" class="t-ng" font-weight="700">✕</text>
+            <circle cx="30" cy="150" r="6.5" class="f-meas"/><text x="30" y="178" text-anchor="middle">a</text>
+            <circle cx="250" cy="150" r="6.5" class="f-meas"/><text x="250" y="178" text-anchor="middle">b</text>
+            <text x="10" y="290" class="t-muted">干渉する → 経路網を使う</text>
+          </g>
+          <g transform="translate(300 0)">
+            <text x="10" y="22" class="t-head">2. 最短経路の辺を順に調べる</text>
+            <ellipse cx="140" cy="150" rx="30" ry="35" class="f-obst"/>
+            <g>
+              <line x1="30" y1="150" x2="80" y2="70" class="s-edge"/><line x1="30" y1="150" x2="140" y2="235" class="s-edge"/>
+              <line x1="90" y1="120" x2="80" y2="70" class="s-edge"/><line x1="80" y1="70" x2="200" y2="70" class="s-edge"/>
+              <line x1="200" y1="70" x2="250" y2="150" class="s-edge"/><line x1="140" y1="235" x2="250" y2="150" class="s-edge"/><line x1="190" y1="180" x2="200" y2="70" class="s-edge"/>
+              <circle cx="80" cy="70" r="3.5" class="f-node"/><circle cx="200" cy="70" r="3.5" class="f-node"/><circle cx="140" cy="235" r="3.5" class="f-node"/>
+            </g>
+            <line x1="30" y1="150" x2="82" y2="124" class="s-ok" marker-end="url(#ah-ok3)"/>
+            <line x1="90" y1="120" x2="190" y2="180" class="s-ng" stroke-width="2.6"/>
+            <line x1="190" y1="180" x2="250" y2="150" class="s-edge" stroke-width="2"/>
+            <text x="38" y="120" class="t-ok">① 可</text>
+            <text x="104" y="200" class="t-ng">② 干渉 → 外す</text>
+            <circle cx="90" cy="120" r="5" class="f-node"/><text x="96" y="110" class="t-muted">n1</text>
+            <circle cx="190" cy="180" r="5" class="f-node"/><text x="198" y="196" class="t-muted">n2</text>
+            <circle cx="30" cy="150" r="6.5" class="f-meas"/><text x="30" y="178" text-anchor="middle">a</text>
+            <circle cx="250" cy="150" r="6.5" class="f-meas"/><text x="250" y="178" text-anchor="middle">b</text>
+            <text x="10" y="290" class="t-muted">干渉した辺でやめ、探し直す</text>
+          </g>
+          <g transform="translate(600 0)">
+            <text x="10" y="22" class="t-head">3. 探し直して全辺が可</text>
+            <ellipse cx="140" cy="150" rx="30" ry="35" class="f-obst"/>
+            <g>
+              <line x1="30" y1="150" x2="90" y2="120" class="s-edge"/><line x1="30" y1="150" x2="80" y2="70" class="s-edge"/>
+              <line x1="90" y1="120" x2="80" y2="70" class="s-edge"/><line x1="80" y1="70" x2="200" y2="70" class="s-edge"/>
+              <line x1="200" y1="70" x2="250" y2="150" class="s-edge"/><line x1="190" y1="180" x2="250" y2="150" class="s-edge"/><line x1="190" y1="180" x2="200" y2="70" class="s-edge"/>
+              <circle cx="90" cy="120" r="3.5" class="f-node"/><circle cx="80" cy="70" r="3.5" class="f-node"/><circle cx="200" cy="70" r="3.5" class="f-node"/><circle cx="190" cy="180" r="3.5" class="f-node"/>
+            </g>
+            <polyline points="30,150 140,235 244,155" class="s-via" marker-end="url(#ah-via3)"/>
+            <circle cx="140" cy="235" r="7" class="f-via"/>
+            <text x="140" y="262" text-anchor="middle" class="t-acc">経由点</text>
+            <circle cx="30" cy="150" r="6.5" class="f-meas"/><text x="30" y="178" text-anchor="middle">a</text>
+            <circle cx="250" cy="150" r="6.5" class="f-meas"/><text x="250" y="178" text-anchor="middle">b</text>
+            <text x="10" y="290" class="t-muted">途中の節点を経由点として返す</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>2 で外した辺（n1 – n2）は、覚えておいた結果として、以後ほかの区間の探索でも干渉ありとして扱います。</figcaption>
+    </figure>
+    <div class="prose">
+      <ul class="plain">
+        <li>a と b を、それぞれ PTP の動作時間が近い 15 個の節点に仮につなぎ、ダイクストラ法で動作時間の合計が最短の経路を求めます（<code>shortest</code>）。</li>
+        <li>経路の辺を前から順に <code>free</code> で調べ、干渉する辺があれば外して求め直します。すべての辺が干渉しなければ、両端を除いた節点を経由点として返します。</li>
+        <li>節点どうしの辺を調べた結果は <code>checked</code> に覚え、ほかの区間でも使い回します。a や b につながる辺はその区間でしか使わないので覚えません。</li>
+        <li>100 回探しても見つからないとき、または経路網の上で a と b がつながらないときは、全軸 0° を経由点にします（次の節）。</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 4. 0° を経由すれば必ずつながる -->
+  <section>
+    <h2><span class="no">4</span>全軸 0° を経由すれば必ずつながる</h2>
+    <div class="two">
+      <div class="prose">
+        <p>測定点を選ぶときに、<b>全軸 0° から PTP で直接行ける点だけ</b>に絞っています（<code>calib.py:225</code>）。前後の点に近い姿勢へ解き直すときも、同じ条件を満たすものだけを採用します（<code>calib.py:240</code>）。</p>
+        <p>このため、どの 2 点 a, b についても「a → 0° → b」は干渉しないことが保証されます。経路網での探索が失敗しても、生成が途中で止まることはありません。</p>
+        <p>経由点はトラッカーから見えている必要がないので、光路とミラーの向きは調べていません。可動範囲については、節点がすべて範囲内にあり、範囲は関節ごとの上限・下限でできた箱（凸集合）なので、その中の 2 点を結ぶ PTP も必ず範囲に収まります。</p>
+      </div>
+      <figure>
+        <div class="fig-box">
+          <svg viewBox="0 0 520 280" role="img" aria-label="全軸 0° からすべての測定点へ直接の PTP が干渉しないことを確認済み。a と b の直接の PTP が干渉しても、a から 0°、0° から b は必ず干渉しない。" style="min-width:420px">
+            <defs>
+              <marker id="ah-via4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-acc"/></marker>
+            </defs>
+            <ellipse cx="260" cy="70" rx="42" ry="30" class="f-obst"/>
+            <!-- 0° から各測定点（確認済み） -->
+            <line x1="260" y1="160" x2="130" y2="180" class="s-ok" stroke-width="1.4"/>
+            <line x1="260" y1="160" x2="390" y2="180" class="s-ok" stroke-width="1.4"/>
+            <line x1="260" y1="160" x2="170" y2="245" class="s-ok" stroke-width="1.4"/>
+            <line x1="260" y1="160" x2="350" y2="245" class="s-ok" stroke-width="1.4"/>
+            <line x1="260" y1="160" x2="260" y2="255" class="s-ok" stroke-width="1.4"/>
+            <circle cx="130" cy="180" r="5.5" class="f-meas"/><circle cx="390" cy="180" r="5.5" class="f-meas"/>
+            <circle cx="170" cy="245" r="5.5" class="f-meas"/><circle cx="350" cy="245" r="5.5" class="f-meas"/><circle cx="260" cy="255" r="5.5" class="f-meas"/>
+            <!-- a と b -->
+            <line x1="150" y1="80" x2="370" y2="80" class="s-ng"/>
+            <text x="260" y="36" text-anchor="middle" class="t-ng">直接は干渉</text>
+            <polyline points="150,80 260,160 363,85" class="s-via" marker-end="url(#ah-via4)"/>
+            <circle cx="150" cy="80" r="6.5" class="f-meas"/><text x="136" y="76" text-anchor="end">a</text>
+            <circle cx="370" cy="80" r="6.5" class="f-meas"/><text x="384" y="76">b</text>
+            <rect x="253" y="153" width="14" height="14" class="f-home" transform="rotate(45 260 160)"/>
+            <text x="300" y="156" class="t-muted">全軸 0°</text>
+            <text x="20" y="272" class="t-ok">0° ⇄ 測定点：選ぶときに確認済み</text>
+          </svg>
+        </div>
+        <figcaption>0° からすべての測定点へは直接の PTP で行けることを確認済みなので、「a → 0° → b」がどの 2 点でも使える最後の手段になります。</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- 5. 限界 -->
+  <section>
+    <h2><span class="no">5</span>限界と改善の余地</h2>
+    <div class="prose">
+      <ul class="plain">
+        <li><b>順番を決めるときに、回り道の時間を考えていません。</b>巡回の順番は直接の PTP の時間で決め、経由点はそのあとで足しています。干渉する区間が多い配置では、順番が最適からずれます。</li>
+        <li><b>経由点でもロボットが止まります。</b>全ポイントを「各点で停止する PTP」でつなぐので、経由点ごとに加速と減速の時間が増えます。</li>
+        <li><b>経路を短くし直していません。</b>経路網の節点をそのまま経由点にするので、飛ばせる経由点が残ったり、姿勢が不自然になったりすることがあります。途中の節点を飛ばしても干渉しないかを試して省く処理（ショートカット）を足せば、経由点の数と時間を減らせます。</li>
+        <li><b>二分の打ち切りで、ごく一部の保証が近似になります。</b>間隔が 1e-4（s の単位）より細かくなると、それ以上は二分しません。長い区間ではこの間の動きが 1 mm 程度になりうるため、そこだけは保証が近似です。</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer>
+    <div>コード：<code>backend/calib.py</code> — <code>free</code>（:173）、<code>roadmap</code>（:186）、<code>connect</code>（:195）、<code>shortest</code>（:27）、reach の計算（:96）、経路網を作って区間ごとにつなぐ処理（:243–246）</div>
+    <div>図はすべて模式図です。実際の関節空間は 6 次元です。</div>
+  </footer>
+</div>
+</body>
+</html>
