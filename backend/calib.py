@@ -73,14 +73,15 @@ def tour(C: list[list[float]]) -> list[int]:
 class Calib:
     """測定条件（トラッカー・ターゲット・エリア・可動範囲・安全距離・関節の速度と加速度）と、干渉を調べるロボットの近似球・障害物を持つ。"""
 
-    def __init__(self, tracker, target_offset, target_dir, cone, area, margin, seed):
+    def __init__(self, tracker, target_offset, target_dir, cone, area, margin, seed, robot_arm=None):
+        self.arm = robot_arm or arm
         self.tracker, self.offset, self.dir = np.array(tracker) / 1000, np.array(target_offset) / 1000, np.array(target_dir, float) / np.linalg.norm(target_dir)
         self.cone, self.margin, self.area = np.radians(cone), margin / 1000, None if area is None else np.array(area) / 1000
-        self.lo, self.hi = np.array(arm.limits, float).T
-        self.max_vel, self.max_acc = np.array(arm.max_vel), np.array(arm.max_acc)
+        self.lo, self.hi = np.array(self.arm.limits, float).T
+        self.max_vel, self.max_acc = np.array(self.arm.max_vel), np.array(self.arm.max_acc)
         self.rng = np.random.default_rng(seed)
         # 近似球は robot-viser-app から全軸 0° の中心を 1 回だけ取り、中心が動く最後の関節（ヤコビアンの列が 0 でない最後の関節）の先のリンク座標に直して手元で動かす（/distances を毎回呼ぶと遅いため）
-        cps, frames = obstacles.control_points([0] * 6), arm.forward_many(np.zeros((1, 6)))[1][0]
+        cps, frames = obstacles.control_points([0] * 6), self.arm.forward_many(np.zeros((1, 6)))[1][0]
         self.parent = [max([i + 1 for i in range(6) if np.abs(np.array(p["jacobian"])[:, i]).max() > 1e-9], default=0) for p in cps]
         self.local = np.array([(np.linalg.inv(frames[k]) @ [*p["position"], 1])[:3] for k, p in zip(self.parent, cps)])
         self.radii = np.array([p["radius"] for p in cps])
@@ -93,12 +94,12 @@ class Calib:
         # 根元に固定された球は動かして避けられないので、障害物（床など）との干渉は見ない（自己干渉と光路の遮蔽には使う）
         self.moving = np.array(self.parent) > 0
         # 関節 i の回転で球の中心が動く量の上限 = 腕の長さ reach[i] × 回転角。腕の長さは、関節 i から球の親の関節までの関節間の距離の合計 + 球のリンク座標でのずれ、の最大
-        lens, off = np.cumsum([0] + [np.linalg.norm(F[:3, 3]) for F, axis in arm.joints if axis is not None]), np.linalg.norm(self.local, axis=1)
+        lens, off = np.cumsum([0] + [np.linalg.norm(F[:3, 3]) for F, axis in self.arm.joints if axis is not None]), np.linalg.norm(self.local, axis=1)
         self.reach = np.array([max([lens[k] - lens[i] + o for k, o in zip(self.parent, off) if k >= i], default=0) for i in range(1, 7)])
 
     # 関節角度 Q (K,6) [deg] での近似球の中心 (K,N,3)、ターゲットの位置 (K,3)、ミラーの向き (K,3)。多くの姿勢をまとめて計算する
     def poses(self, Q):
-        T, frames = arm.forward_many(np.radians(Q))
+        T, frames = self.arm.forward_many(np.radians(Q))
         F = frames[:, self.parent]
         return np.einsum("knij,nj->kni", F[..., :3, :3], self.local) + F[..., :3, 3], T[:, :3, :3] @ self.offset + T[:, :3, 3], T[:, :3, :3] @ self.dir
 
@@ -134,7 +135,7 @@ class Calib:
     def aim(self, Q0, P) -> np.ndarray:
         q = np.radians(Q0)
         for _ in range(50):
-            T, J = arm.jacobian_many(q)
+            T, J = self.arm.jacobian_many(q)
             r, n = T[:, :3, :3] @ self.offset, T[:, :3, :3] @ self.dir
             d = self.tracker - T[:, :3, 3] - r
             d /= np.linalg.norm(d, axis=1, keepdims=True)
@@ -218,8 +219,8 @@ class Calib:
 
 # 測定動作を作る。長さ [mm]・角度 [deg]。area は [[xmin, ymin, zmin], [xmax, ymax, zmax]]（None なら動作領域全体）
 # 返り値: 全ポイント（label: start / measure / via / end、関節角度、ターゲット位置 [mm]）と、それを PTP でつないだ軌道（時刻・関節角度）
-def plan_calib(num_points, tracker, target_offset, target_dir, cone, area, margin, dt, seed=0) -> dict:
-    c, home = Calib(tracker, target_offset, target_dir, cone, area, margin, seed), np.zeros(6)
+def plan_calib(num_points, tracker, target_offset, target_dir, cone, area, margin, dt, seed=0, robot_arm=None) -> dict:
+    c, home = Calib(tracker, target_offset, target_dir, cone, area, margin, seed, robot_arm), np.zeros(6)
     if c.clearance(c.poses(home[None])[0])[0] < 0: raise ValueError("全軸 0° の姿勢が障害物と干渉しています")
     # 条件を満たす候補を点数の 5 倍集め、ターゲット位置が空間に広がるよう選ぶ。全軸 0° から PTP で直接行ける点だけにする（どの 2 点の間も、全軸 0° を経由すれば必ず干渉せずにつなげる）
     found = c.candidates(5 * num_points, 300 * num_points)
@@ -250,23 +251,26 @@ def plan_calib(num_points, tracker, target_offset, target_dir, cone, area, margi
     # 再生・確認用に、全ポイントを PTP（各点で停止）でつないだ軌道にする
     times, angles = [0.0], [home.tolist()]
     for (_, a, _), (_, b, _) in zip(rows[:-1], rows[1:]):
-        ts, qs = plan_ptp(a, b, dt)
+        ts, qs = plan_ptp(a, b, dt, robot_arm=c.arm)
         times += [times[-1] + ti for ti in ts[1:]]
         angles += qs[1:]
-    points = [{"label": label, "angles": q.tolist(), "position": ((c.poses(q[None])[1][0] if p is None else p) * 1000).tolist()} for label, q, p in rows]
+    Q = np.array([q for _, q, _ in rows])
+    _, target_positions, _ = c.poses(Q)
+    frames = c.arm.forward_many(np.radians(Q))[0][:, :3, :3]
+    points = [{"label": label, "angles": q.tolist(), "position": ((x if p is None else p) * 1000).tolist(), "orientation": R.tolist()}
+              for (label, q, p), x, R in zip(rows, target_positions, frames)]
     return {"points": points, "times": times, "angles": angles}
 
 
-# 各可動関節の回転軸（その関節の座標系）
-AXES = [a for _, a in arm.joints if a is not None]
 # J1 動作: 30° の連続動作を 5 区間、25° ずつずらして並べる（隣の区間と 5° 重なり、全体で 130°）
 J1_SPAN, J1_COUNT, J1_STEP = 30, 5, 25
 
 
 # 関節角度 Q (K,6) [deg] での、関節 j の回転軸からターゲットまでの距離（回転半径）(K,) [m]
 def radius(c: Calib, Q, j: int) -> np.ndarray:
-    T, F = arm.forward_many(np.radians(Q))
-    u, v = F[:, j + 1, :3, :3] @ AXES[j], T[:, :3, :3] @ c.offset + T[:, :3, 3] - F[:, j + 1, :3, 3]
+    T, F = c.arm.forward_many(np.radians(Q))
+    axis = [a for _, a in c.arm.joints if a is not None][j]
+    u, v = F[:, j + 1, :3, :3] @ axis, T[:, :3, :3] @ c.offset + T[:, :3, 3] - F[:, j + 1, :3, 3]
     return np.linalg.norm(v - (v * u).sum(1, keepdims=True) * u, axis=1)
 
 
@@ -274,12 +278,13 @@ def radius(c: Calib, Q, j: int) -> np.ndarray:
 # ミラーは tool0 の xy 面内にあり J6 はその法線（tool0 z）まわりに回すので、トラッカー方向を tool0 の xy 面へ射影した向きに合わせる
 def aim_j6(c: Calib, Q) -> np.ndarray:
     Q = np.array(Q, float)
+    axes = [a for _, a in c.arm.joints if a is not None]
     # ターゲットが J6 の軸からずれていると J6 でターゲットの位置も変わるので、もう一度求め直す
     for _ in range(2):
-        T, F = arm.forward_many(np.radians(Q))
+        T, F = c.arm.forward_many(np.radians(Q))
         R = T[:, :3, :3]
         t = np.einsum("kji,kj->ki", R, c.tracker - R @ c.offset - T[:, :3, 3])
-        s = np.sign(np.einsum("kij,j,ki->k", F[:, 6, :3, :3], AXES[5], R[:, :, 2]))
+        s = np.sign(np.einsum("kij,j,ki->k", F[:, 6, :3, :3], axes[5], R[:, :, 2]))
         Q[:, 5] += s * np.degrees(np.arctan2(t[:, 1], t[:, 0]) - np.arctan2(c.dir[1], c.dir[0]))
     J6 = np.round(((Q[:, 5] + 180) % 360 - 180) / 5) * 5
     return np.where(J6 > c.hi[5], J6 - 360, np.where(J6 < c.lo[5], J6 + 360, J6))

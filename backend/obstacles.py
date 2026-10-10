@@ -30,6 +30,13 @@ def control_points(angles_deg) -> list[dict]:
     return query(angles_deg, 0)["control_points"]
 
 
+# robot-viser-app で現在選択中のアーム名
+def active_arm() -> str:
+    res = client.get("/robots")
+    res.raise_for_status()
+    return res.json()["current"]["arm"]
+
+
 # robot-viser-app に登録中の障害物（/obstacles と同じ形式、座標は base_link 基準 [m]）
 def registered() -> list[dict]:
     return client.get("/obstacles").json()["obstacles"]

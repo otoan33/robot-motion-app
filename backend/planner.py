@@ -23,8 +23,8 @@ def trapezoid(kv: float, ka: float, dt: float, duration: float | None = None) ->
 
 
 # 関節角度が URDF の可動範囲内にあることを確認する
-def check_joint_limits(*angles) -> None:
-    limits = np.asarray(arm.limits)
+def check_joint_limits(*angles, robot_arm: Arm | None = None) -> None:
+    limits = np.asarray((robot_arm or arm).limits)
     for q in angles:
         q = np.asarray(q, float)
         if not np.isfinite(q).all() or np.any(q < limits[:, 0]) or np.any(q > limits[:, 1]):
@@ -33,10 +33,11 @@ def check_joint_limits(*angles) -> None:
 
 # PTP（関節補間）。全関節で共通の s を使い、全関節を同時に加減速・到着させる
 # 角度 [deg]、速度 [deg/s]、加速度 [deg/s²]、時刻 [s]
-def plan_ptp(start, goal, dt: float, duration: float | None = None) -> tuple[list[float], list[list[float]]]:
-    check_joint_limits(start, goal)
+def plan_ptp(start, goal, dt: float, duration: float | None = None, robot_arm: Arm | None = None) -> tuple[list[float], list[list[float]]]:
+    robot_arm = robot_arm or arm
+    check_joint_limits(start, goal, robot_arm=robot_arm)
     q0, d = np.asarray(start, float), np.asarray(goal, float) - np.asarray(start, float)
-    t, s = trapezoid(np.max(np.abs(d) / arm.max_vel), np.max(np.abs(d) / arm.max_acc), dt, duration)
+    t, s = trapezoid(np.max(np.abs(d) / robot_arm.max_vel), np.max(np.abs(d) / robot_arm.max_acc), dt, duration)
     return t.tolist(), (q0 + np.outer(s, d)).tolist()
 
 

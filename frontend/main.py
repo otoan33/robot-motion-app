@@ -183,10 +183,16 @@ async def index(request: Request):
                 r = res.json()
                 state["csv"], state["points_csv"] = r["trajectory_csv"], r["points_csv"]
                 show_chart(r["trajectory_csv"])
-                # 確認用に、トラッカー（球）・測定点（赤）・経由点（灰）・エリア（半透明の箱）を robot-viser に描く
+                # 確認用に、トラッカー（球）・測定点（座標系）・経由点（灰）・エリア（半透明の箱）を robot-viser に描く
                 shapes = [{"name": "tracker", "type": "sphere", **dict(zip("xyz", req["tracker"])), "size": 60, "color": "#0080ff"}]
-                shapes += [{"name": f"{i}_{p['label']}", "type": "point", **dict(zip("xyz", p["position"])), "size": 25 if p["label"] == "measure" else 15, "color": "#ff0000" if p["label"] == "measure" else "#808080"}
-                           for i, p in enumerate(r["points"]) if p["label"] in ("measure", "via")]
+                for i, p in enumerate(r["points"]):
+                    if p["label"] == "measure":
+                        for j, (axis, color) in enumerate(zip("xyz", ("#ff0000", "#00aa44", "#0060ff"))):
+                            end = [v + 35 * p["orientation"][k][j] for k, v in enumerate(p["position"])]
+                            shapes.append({"name": f"{i}_measure_{axis}", "type": "line", **dict(zip("xyz", p["position"])),
+                                           **dict(zip(("x2", "y2", "z2"), end)), "size": 3, "color": color})
+                    elif p["label"] == "via":
+                        shapes.append({"name": f"{i}_via", "type": "point", **dict(zip("xyz", p["position"])), "size": 15, "color": "#808080"})
                 if use_area.value: shapes.append({"name": "area", "type": "box", **{k: (a + b) / 2 for k, a, b in zip("xyz", req["area_min"], req["area_max"])},
                                                   **{k: b - a for k, a, b in zip(("sx", "sy", "sz"), req["area_min"], req["area_max"])}, "color": "#00aa44", "opacity": 0.15})
                 (await viser_api.post("/shapes", json={"shapes": shapes})).raise_for_status()

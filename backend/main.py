@@ -5,6 +5,8 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from backend.calib import plan_calib, plan_calib_axis
+from backend.kinematics import load_arm
+from backend.obstacles import active_arm
 from backend.planner import arm, plan_lin, plan_ptp, tcp_pose
 from backend.rmp import plan_rmp, plan_rmp_path, plan_rmp_track, track_target_path
 
@@ -95,7 +97,8 @@ class CalibRequest(BaseModel):
 @app.post("/calib")
 def post_calib(req: CalibRequest):
     area = None if req.area_min is None or req.area_max is None else [req.area_min, req.area_max]
-    r = plan_calib(req.num_points, req.tracker, req.target_offset, req.target_dir, req.cone, area, req.margin, req.dt, req.seed)
+    robot_arm = load_arm(active_arm())
+    r = plan_calib(req.num_points, req.tracker, req.target_offset, req.target_dir, req.cone, area, req.margin, req.dt, req.seed, robot_arm)
     points_csv = "\n".join(["no,label," + ",".join(f"joint{i}" for i in range(1, 7)), *(f"{i},{p['label']}," + ",".join(f"{a:.6f}" for a in p["angles"]) for i, p in enumerate(r["points"]))]) + "\n"
     trajectory_csv = "\n".join(["t," + ",".join(f"joint{i}" for i in range(1, 7)), *(f"{t:.4f}," + ",".join(f"{a:.6f}" for a in q) for t, q in zip(r["times"], r["angles"]))]) + "\n"
     return {"points": r["points"], "points_csv": points_csv, "trajectory_csv": trajectory_csv, "duration_sec": r["times"][-1],

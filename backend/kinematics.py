@@ -1,11 +1,13 @@
 """URDF の関節定義から、6軸アームの順運動学・逆運動学を求める。座標は base_link（= viser のワールド）基準、長さは m、角度は rad。"""
 import xml.etree.ElementTree as ET
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 
-# robot-viser-app で表示しているアーム（robotA）の URDF。形状は使わず、関節の位置・回転軸だけを読む
-ARM_URDF = Path(__file__).parent / "assets" / "arms" / "robotA" / "arm.urdf"
+# 既定のアームと、robot-viser-app が選択したアームの URDF 格納先
+ARM_DIR = Path(__file__).parent / "assets" / "arms"
+ARM_URDF = ARM_DIR / "robotA" / "arm.urdf"
 
 
 # 回転軸 axis まわりに q[rad] 回す回転行列（ロドリゲスの公式）
@@ -93,3 +95,14 @@ class Arm:
             if np.linalg.norm(e) < 1e-10: break
             q += J.T @ np.linalg.solve(J @ J.T + damping**2 * np.eye(6), e)
         return q, float(np.linalg.norm(e))
+
+
+@lru_cache(maxsize=None)
+def load_arm(name: str) -> Arm:
+    # ロボット名だけでローカル URDF を選び、表示側と同じ運動学を使う
+    if not name or Path(name).name != name or name in {".", ".."}:
+        raise ValueError(f"不正なアーム名です: {name}")
+    path = ARM_DIR / name / "arm.urdf"
+    if not path.is_file():
+        raise ValueError(f"選択中のアーム {name} の URDF が見つかりません: {path}")
+    return Arm(path)

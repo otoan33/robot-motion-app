@@ -51,8 +51,14 @@ FLOOR = [{"type": "box", "name": "floor", "center": [0, 0, -0.06], "size": [4, 4
 # 測定動作の確認用の補助図形（画面の「生成」と同じく、トラッカー・測定点・経由点・エリア）。寸法は mm
 def calib_shapes(req: dict, points: list) -> list:
     shapes = [{"name": "tracker", "type": "sphere", **dict(zip("xyz", req.get("tracker", [0, 2500, 800]))), "size": 60, "color": "#0080ff"}]
-    shapes += [{"name": f"{i}_{p['label']}", "type": "point", **dict(zip("xyz", p["position"])), "size": 25 if p["label"] == "measure" else 15, "color": "#ff0000" if p["label"] == "measure" else "#808080"}
-               for i, p in enumerate(points) if p["label"] in ("measure", "via")]
+    for i, p in enumerate(points):
+        if p["label"] == "measure":
+            for j, (axis, color) in enumerate(zip("xyz", ("#ff0000", "#00aa44", "#0060ff"))):
+                end = [v + 35 * p["orientation"][k][j] for k, v in enumerate(p["position"])]
+                shapes.append({"name": f"{i}_measure_{axis}", "type": "line", **dict(zip("xyz", p["position"])),
+                               **dict(zip(("x2", "y2", "z2"), end)), "size": 3, "color": color})
+        elif p["label"] == "via":
+            shapes.append({"name": f"{i}_via", "type": "point", **dict(zip("xyz", p["position"])), "size": 15, "color": "#808080"})
     if "area_min" in req: shapes.append({"name": "area", "type": "box", **{k: (a + b) / 2 for k, a, b in zip("xyz", req["area_min"], req["area_max"])},
                                          **{k: b - a for k, a, b in zip(("sx", "sy", "sz"), req["area_min"], req["area_max"])}, "color": "#00aa44", "opacity": 0.15})
     return shapes
