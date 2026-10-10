@@ -73,7 +73,7 @@ def mid(p, q, offset=(0, 0, 0)):
 # 動画ごとの題名・説明・サンプル（説明文, 生成条件, 障害物）。生成条件は robot-motion-app の /trajectory のリクエスト
 VIDEOS = [
     ("01_ptp", "PTP（関節補間・台形速度）", "全関節が同時に加減速し、同時に目標へ着く。先端の軌跡は曲線になる",
-     [(f"{n}", {"mode": "ptp", "start": s, "goal": g, "max_vel": [30] * 6, "max_acc": [60] * 6}, [])
+     [(f"{n}", {"mode": "ptp", "start": s, "goal": g}, [])
       for n, s, g in [("A → B", A, B), ("B → C", B, C), ("C → A", C, A)]]),
     ("02_lin", "LIN（直線補間・台形速度）", "先端を直線、姿勢を一定の回転軸まわりに補間し、各時刻の関節角度を逆運動学で求める",
      [(f"{n}", {"mode": "lin", "start": s, "goal": g, "lin_vel": 250, "lin_acc": 500}, [])

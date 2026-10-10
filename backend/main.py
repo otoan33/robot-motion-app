@@ -19,10 +19,8 @@ def _(_request: Request, e: ValueError):
 # 6軸アーム専用のため、関節ごとの値は常に6個
 Joints = Annotated[list[float], Field(min_length=6, max_length=6)]
 
-# frontend の初期値に使う既定の設定（dt はロボットログと同じ 10ms）。lin_* / rot_* は LIN・RMP の先端の速度・加速度
-# joint_min / joint_max は測定動作の可動範囲 [deg]（URDF の limit）
-DEFAULTS = {"max_vel": [180.0] * 6, "max_acc": [720.0] * 6, "lin_vel": 250.0, "lin_acc": 1000.0, "rot_vel": 90.0, "rot_acc": 360.0, "dt": 0.01,
-            "joint_min": [round(lo, 1) for lo, _ in arm.limits], "joint_max": [round(hi, 1) for _, hi in arm.limits]}
+# frontend の初期値（関節制限は URDF、lin_* / rot_* は先端の速度・加速度）
+DEFAULTS = {"lin_vel": 250.0, "lin_acc": 1000.0, "rot_vel": 90.0, "rot_acc": 360.0, "dt": 0.01}
 
 
 # 長さ・方向などの 3 次元ベクトル
@@ -36,8 +34,6 @@ class TrajectoryRequest(BaseModel):
     start: Joints
     via: list[Joints] = []
     goal: Joints
-    max_vel: Joints = DEFAULTS["max_vel"]
-    max_acc: Joints = DEFAULTS["max_acc"]
     lin_vel: float = Field(DEFAULTS["lin_vel"], gt=0)
     lin_acc: float = Field(DEFAULTS["lin_acc"], gt=0)
     rot_vel: float = Field(DEFAULTS["rot_vel"], gt=0)
@@ -62,18 +58,18 @@ class TrajectoryRequest(BaseModel):
 def generate(req: TrajectoryRequest) -> tuple[list[float], list[list[float]], dict]:
     avoid = req.avoid_distance if req.avoid else None
     if req.mode == "lin":
-        return *plan_lin(req.start, req.goal, req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.dt, req.duration), {}
+        return *plan_lin(req.start, req.goal, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.dt, req.duration), {}
     if req.mode == "rmp":
-        times, angles, d = plan_rmp(req.start, req.goal, req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.dt, avoid)
+        times, angles, d = plan_rmp(req.start, req.goal, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.dt, avoid)
         return times, angles, {"min_distance": d}
     if req.mode == "rmp_path":
-        times, angles, d = plan_rmp_path(req.start, req.via, req.goal, req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.blend, req.dt, avoid)
+        times, angles, d = plan_rmp_path(req.start, req.via, req.goal, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.blend, req.dt, avoid)
         return times, angles, {"min_distance": d}
     if req.mode == "rmp_track":
         times, angles, d, caught, err = plan_rmp_track(req.start, req.goal, req.track_motion, req.track_speed, req.track_dir, req.track_radius, req.track_time,
-                                                       req.max_vel, req.max_acc, req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.dt, avoid)
+                                                       req.lin_vel, req.lin_acc, req.rot_vel, req.rot_acc, req.dt, avoid)
         return times, angles, {"min_distance": d, "catch_time": caught, "track_error": err}
-    return *plan_ptp(req.start, req.goal, req.max_vel, req.max_acc, req.dt, req.duration), {}
+    return *plan_ptp(req.start, req.goal, req.dt, req.duration), {}
 
 
 # レーザートラッカーでのキャリブレーション用の測定動作の生成条件。長さは mm（base_link 基準）、角度は deg
@@ -89,11 +85,7 @@ class CalibRequest(BaseModel):
     cone: float = Field(30.0, gt=0, le=90)
     area_min: Vec3 | None = None
     area_max: Vec3 | None = None
-    joint_min: Joints = DEFAULTS["joint_min"]
-    joint_max: Joints = DEFAULTS["joint_max"]
     margin: float = Field(10.0, ge=0)
-    max_vel: Joints = DEFAULTS["max_vel"]
-    max_acc: Joints = DEFAULTS["max_acc"]
     dt: float = Field(DEFAULTS["dt"], gt=0)
     seed: int = 0
 
@@ -103,7 +95,7 @@ class CalibRequest(BaseModel):
 @app.post("/calib")
 def post_calib(req: CalibRequest):
     area = None if req.area_min is None or req.area_max is None else [req.area_min, req.area_max]
-    r = plan_calib(req.num_points, req.tracker, req.target_offset, req.target_dir, req.cone, area, req.joint_min, req.joint_max, req.margin, req.max_vel, req.max_acc, req.dt, req.seed)
+    r = plan_calib(req.num_points, req.tracker, req.target_offset, req.target_dir, req.cone, area, req.margin, req.dt, req.seed)
     points_csv = "\n".join(["no,label," + ",".join(f"joint{i}" for i in range(1, 7)), *(f"{i},{p['label']}," + ",".join(f"{a:.6f}" for a in p["angles"]) for i, p in enumerate(r["points"]))]) + "\n"
     trajectory_csv = "\n".join(["t," + ",".join(f"joint{i}" for i in range(1, 7)), *(f"{t:.4f}," + ",".join(f"{a:.6f}" for a in q) for t, q in zip(r["times"], r["angles"]))]) + "\n"
     return {"points": r["points"], "points_csv": points_csv, "trajectory_csv": trajectory_csv, "duration_sec": r["times"][-1],
@@ -111,22 +103,17 @@ def post_calib(req: CalibRequest):
 
 
 # J1・J2・J3 を 1 軸ずつ連続で動かす校正動作の生成条件。target_dir の既定はフランジ面と平行（tool0 の x 軸）。axes は動かす軸
-# sweep_range は J2・J3 の動作範囲、sweep_vel は測定中の動かす軸の速度 [deg/s]。radius_ratio は回転半径の下限（全候補の最大の何倍以上か）。J1 の 30° ×5 区間・重なり 5° は固定
+# sweep_range は J2・J3 の動作区間幅。速度・加速度と関節可動範囲は URDF を使う。radius_ratio は回転半径の下限（全候補の最大の何倍以上か）。J1 の 30° ×5 区間・重なり 5° は固定
 class CalibAxisRequest(BaseModel):
     tracker: Vec3 = [0.0, 2500.0, 800.0]
     target_offset: Vec3 = [0.0, 0.0, 0.0]
     target_dir: Vec3 = [1.0, 0.0, 0.0]
     cone: float = Field(30.0, gt=0, le=90)
-    joint_min: Joints = DEFAULTS["joint_min"]
-    joint_max: Joints = DEFAULTS["joint_max"]
     margin: float = Field(10.0, ge=0)
-    max_vel: Joints = DEFAULTS["max_vel"]
-    max_acc: Joints = DEFAULTS["max_acc"]
     dt: float = Field(DEFAULTS["dt"], gt=0)
     seed: int = 0
     axes: list[Literal[1, 2, 3]] = Field([1, 2, 3], min_length=1)
     sweep_range: int = Field(60, gt=0, multiple_of=5)
-    sweep_vel: float = Field(10.0, gt=0)
     radius_ratio: float = Field(0.7, ge=0, le=1)
 
 
@@ -134,8 +121,7 @@ class CalibAxisRequest(BaseModel):
 # PTP でつないだ再生用の軌道 CSV（t,joint1..joint6）を返す。関節角度はすべて 5 の倍数なので整数で書く。segments・traces・radii は画面での表示用
 @app.post("/calib/axis")
 def post_calib_axis(req: CalibAxisRequest):
-    r = plan_calib_axis(req.tracker, req.target_offset, req.target_dir, req.cone, req.joint_min, req.joint_max, req.margin, req.max_vel, req.max_acc, req.dt, req.seed,
-                        req.axes, req.sweep_range, req.sweep_vel, req.radius_ratio)
+    r = plan_calib_axis(req.tracker, req.target_offset, req.target_dir, req.cone, req.margin, req.dt, req.seed, req.axes, req.sweep_range, req.radius_ratio)
     header = "no,label,axis," + ",".join(f"{k}_joint{i}" for k in ("start", "end") for i in range(1, 7))
     points_csv = "\n".join([header, *(f"{i},{s['label']},{s['axis'] or ''}," + ",".join(str(round(a)) for a in s["start"] + s["end"]) for i, s in enumerate(r["segments"]))]) + "\n"
     trajectory_csv = "\n".join(["t," + ",".join(f"joint{i}" for i in range(1, 7)), *(f"{t:.4f}," + ",".join(f"{a:.6f}" for a in q) for t, q in zip(r["times"], r["angles"]))]) + "\n"
@@ -146,7 +132,7 @@ def post_calib_axis(req: CalibAxisRequest):
 # 選べる動作モードと既定の設定を返す（calib は /calib で作る測定動作、calib_axis は /calib/axis で作る単軸動作）
 @app.get("/modes")
 def get_modes():
-    return {"modes": ["ptp", "lin", "rmp", "rmp_path", "rmp_track", "calib", "calib_axis"], "defaults": DEFAULTS}
+    return {"modes": ["ptp", "lin", "rmp", "rmp_path", "rmp_track", "calib", "calib_axis"], "defaults": DEFAULTS, "joint_limits": arm.limits}
 
 
 # 関節角度 [deg] での先端（tool0）の位置 [mm] と姿勢 roll / pitch / yaw [deg] を返す

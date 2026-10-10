@@ -31,16 +31,20 @@ def matrix_rpy(R: np.ndarray) -> np.ndarray:
 
 
 class Arm:
-    # 関節を定義順（根元→先端の一本鎖）に読み、各関節の取り付け位置・姿勢と回転軸（固定関節は None）を持つ。可動範囲 limits は [下限, 上限] [deg] の組
+    # URDF から各関節の姿勢定義と、可動範囲・速度・加速度の制限を読む
     def __init__(self, path: Path = ARM_URDF):
-        self.joints, self.limits = [], []
+        self.joints, self.limits, self.max_vel, self.max_acc = [], [], [], []
         for j in ET.parse(path).getroot().iter("joint"):
             o = j.find("origin")
             F = np.eye(4)
             F[:3, :3], F[:3, 3] = rpy_matrix([float(v) for v in o.get("rpy", "0 0 0").split()]), [float(v) for v in o.get("xyz", "0 0 0").split()]
             axis = np.array([float(v) for v in j.find("axis").get("xyz").split()]) if j.get("type") == "revolute" else None
             self.joints.append((F, axis))
-            if axis is not None: self.limits.append([float(np.degrees(float(j.find("limit").get(k)))) for k in ("lower", "upper")])
+            if axis is not None:
+                limit = j.find("limit")
+                self.limits.append([float(np.degrees(float(limit.get(k)))) for k in ("lower", "upper")])
+                self.max_vel.append(float(np.degrees(float(limit.get("velocity")))))
+                self.max_acc.append(float(np.degrees(float(limit.get("acceleration")))))
 
     # 関節角度 q[rad] での先端（tool0）の 4x4 変換と、ヤコビアン用の各可動関節の位置・回転軸（ワールド座標）
     def forward(self, q) -> tuple[np.ndarray, list]:

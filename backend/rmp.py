@@ -10,7 +10,7 @@ import numpy as np
 from backend.kinematics import rotvec
 from backend.obstacles import distances
 from backend.path import Path
-from backend.planner import arm
+from backend.planner import arm, check_joint_limits
 
 
 # ソフト正規化 s(v) = v / h(|v|)。遠くでは単位ベクトル、目標から η 程度の距離に入ると v に比例する（RMPflow の soft-normalization）
@@ -29,9 +29,15 @@ def step(q, qd, leaves, vmax, amax, h: float) -> tuple[np.ndarray, np.ndarray]:
     M, f = sum(J.T @ M @ J for J, _, M in leaves), sum(J.T @ M @ a for J, a, M in leaves)
     qdd = np.linalg.solve(M, f)
     qdd *= min(1, np.min(amax / (np.abs(qdd) + 1e-12)))
+    limits = np.radians(np.asarray(arm.limits))
+    stopping = qd**2 / (2 * amax) + np.abs(qd) * h
+    qdd = np.where((qd > 0) & (limits[:, 1] - q <= stopping), np.minimum(qdd, -amax), qdd)
+    qdd = np.where((qd < 0) & (q - limits[:, 0] <= stopping), np.maximum(qdd, amax), qdd)
     qd = qd + h * qdd
     qd *= min(1, np.min(vmax / (np.abs(qd) + 1e-12)))
-    return q + h * qd, qd
+    q_next = q + h * qd
+    hit = ((q_next < limits[:, 0]) & (qd < 0)) | ((q_next > limits[:, 1]) & (qd > 0))
+    return np.clip(q_next, limits[:, 0], limits[:, 1]), np.where(hit, 0, qd)
 
 
 # 先端の 4x4 変換・ヤコビアンと、関節が等速のときの先端の加速度 J̇q̇（少し先の姿勢のヤコビアンとの差から求める）
@@ -84,10 +90,11 @@ def substeps(dt: float) -> tuple[int, float]:
 # 目標到達 RMP による PTP。先端（tool0）の位置・姿勢を目標の関節角度での先端姿勢へ引き寄せつつ、関節空間の弱い引き寄せで最終の関節の形態を目標に合わせる
 # 先端の最大速度 [mm/s]・[deg/s] と最大加速度 [mm/s²]・[deg/s²] から各ポリシーの係数を決め、関節の速度・加速度は上限で頭打ちにする
 # avoid [mm] を指定すると、その影響距離で障害物回避 RMP を合成する（返り値の最後は軌道全体での障害物との最小距離 [mm]。回避なしなら None）
-def plan_rmp(start, goal, max_vel, max_acc, lin_vel, lin_acc, rot_vel, rot_acc, dt: float, avoid: float | None = None,
+def plan_rmp(start, goal, lin_vel, lin_acc, rot_vel, rot_acc, dt: float, avoid: float | None = None,
              weights=(1.0, 0.3, 0.05), time_limit: float = 60.0, tol: float = 1e-2) -> tuple[list[float], list[list[float]], float | None]:
+    check_joint_limits(start, goal)
     q, qd, qg = np.radians(start), np.zeros(6), np.radians(goal)
-    vmax, amax = np.radians(max_vel), np.radians(max_acc)
+    vmax, amax = np.radians(arm.max_vel), np.radians(arm.max_acc)
     Tg = arm.forward(qg)[0]
     # 先端の位置 [m]・姿勢 [rad] と関節 [rad] の各ポリシーの最大速度と減衰（β = 最大加速度 / 最大速度 で、動き出しの加速度が最大加速度になる）
     v_p, v_r, v_q = lin_vel / 1000, np.radians(rot_vel), np.min(vmax)
@@ -123,10 +130,11 @@ def plan_rmp(start, goal, max_vel, max_acc, lin_vel, lin_acc, rot_vel, rot_acc, 
 # 経路追従 RMP。開始・経由点・目標の先端位置を結んだ折れ線（角は blend [mm] で丸める）に沿って、経路上の最寄り点から
 # 接線方向へ経路の速度プロファイルで進みつつ横ずれを戻し、姿勢は最寄り点に割り振った姿勢へ引き寄せる。時刻ではなく経路上の位置で進むため、遅れても急がない
 # avoid [mm] を指定すると、その影響距離で障害物回避 RMP を合成する（返り値の最後は軌道全体での障害物との最小距離 [mm]。回避なしなら None）
-def plan_rmp_path(start, via, goal, max_vel, max_acc, lin_vel, lin_acc, rot_vel, rot_acc, blend: float, dt: float, avoid: float | None = None,
+def plan_rmp_path(start, via, goal, lin_vel, lin_acc, rot_vel, rot_acc, blend: float, dt: float, avoid: float | None = None,
                   weights=(1.0, 0.3, 1e-5), time_limit: float = 120.0, tol: float = 1e-2) -> tuple[list[float], list[list[float]], float | None]:
+    check_joint_limits(start, *via, goal)
     q, qd, qg = np.radians(start), np.zeros(6), np.radians(goal)
-    vmax, amax = np.radians(max_vel), np.radians(max_acc)
+    vmax, amax = np.radians(arm.max_vel), np.radians(arm.max_acc)
     a_p, a_r = lin_acc / 1000, np.radians(rot_acc)
     w_p, w_r, w_q = weights
     path = Path([arm.forward(np.radians(a))[0] for a in [start, *via, goal]], blend / 1000, lin_vel / 1000, a_p, np.radians(rot_vel))
@@ -204,10 +212,11 @@ def chase(e: np.ndarray, ed: np.ndarray, vmax: float, amax: float, omega: float)
 # 先端の位置はターゲットとの相対で追いかけ（chase）、ターゲットの加速度を先回りで足す。遠くではターゲットに対して先端速度で近づき、追いついたら同じ速度で動きながらずれを戻す
 # 姿勢は目標の姿勢へ同じ形で寄せる。ターゲットが止まらないので、duration [s] だけ動かして終える（長さ mm・速さ mm/s・角度 deg）
 # 返り値の最後は、障害物との最小距離 [mm]（回避なしなら None）、追いついた時刻 [s]（位置 1 mm・姿勢 1° 以内に初めて入った時刻。追いつかなければ None）、追いついた後の位置の最大誤差 [mm]
-def plan_rmp_track(start, goal, motion: str, speed: float, direction, radius: float, duration: float, max_vel, max_acc, lin_vel, lin_acc, rot_vel, rot_acc, dt: float,
+def plan_rmp_track(start, goal, motion: str, speed: float, direction, radius: float, duration: float, lin_vel, lin_acc, rot_vel, rot_acc, dt: float,
                    avoid: float | None = None, weights=(1.0, 0.3, 1e-5)) -> tuple[list[float], list[list[float]], float | None, float | None, float | None]:
+    check_joint_limits(start, goal)
     q, qd = np.radians(start), np.zeros(6)
-    vmax, amax = np.radians(max_vel), np.radians(max_acc)
+    vmax, amax = np.radians(arm.max_vel), np.radians(arm.max_acc)
     Tg = arm.forward(np.radians(goal))[0]
     target = target_motion(Tg[:3, 3], motion, speed / 1000, direction, radius / 1000)
     # 先端の位置 [m]・姿勢 [rad] の最大速度・加速度。最後に距離に比例させる ω は経路追従の終点と同じ（5 mm 手前から比例）

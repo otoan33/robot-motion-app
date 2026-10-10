@@ -1,4 +1,4 @@
-import json
+import math
 import os
 from datetime import datetime
 
@@ -16,6 +16,14 @@ MODE_LABELS = {"ptp": "PTP（関節補間・台形速度）", "lin": "LIN（直�
                "calib_axis": "単軸動作（レーザートラッカー校正）"}
 
 
+# /tool の ZYX オイラー角から、SMR オフセットとミラーが向くローカル +Z 方向を求める
+def tool_target(tool: dict[str, float]) -> tuple[list[float], list[float]]:
+    u, v, w = (math.radians(tool[k]) for k in ("u", "v", "w"))
+    direction = [math.cos(u) * math.sin(v) * math.cos(w) + math.sin(u) * math.sin(w),
+                 math.sin(u) * math.sin(v) * math.cos(w) - math.cos(u) * math.sin(w), math.cos(v) * math.cos(w)]
+    return [tool[k] for k in ("x", "y", "z")], direction
+
+
 @ui.page("/")
 async def index(request: Request):
     info = (await client.get("/modes")).json()
@@ -26,7 +34,7 @@ async def index(request: Request):
     # 6軸分の数値入力を並べる（制限値は桁が少ないので6列で詰める）
     def joint_inputs(values: list[float], columns: int = 3):
         with ui.grid(columns=columns).classes("w-full"):
-            return [ui.number(f"J{i}", value=v).classes("w-full") for i, v in enumerate(values, 1)]
+            return [ui.number(f"J{i}", value=v, min=info["joint_limits"][i - 1][0], max=info["joint_limits"][i - 1][1]).classes("w-full") for i, v in enumerate(values, 1)]
     # X, Y, Z の数値入力を並べる
     def xyz_inputs(values: list[float]):
         with ui.grid(columns=3).classes("w-full"):
@@ -85,13 +93,10 @@ async def index(request: Request):
                         for n, v in zip(row, values): n.value = v
                 ui.button("開始⇄目標", on_click=swap).props("flat")
 
-            # 関節ごとの速度・加速度の上限（LIN・RMP でも関節はこれを超えない）と、LIN・RMP の先端の速度・加速度、経路追従の角の丸め、サンプリング周期・動作時間（RMP はポリシーで決まるので使わない）
-            with ui.card().classes("w-full"):
+            # 関節制限は URDF を使い、画面では先端制限など関節以外の条件を指定する
+            with ui.card().classes("w-full").bind_visibility_from(mode, "value", backward=lambda m: m not in ("calib", "calib_axis")):
                 ui.label("制限").classes("text-lg font-bold")
-                ui.label("関節の最大速度 [deg/s]")
-                max_vel = joint_inputs(defaults["max_vel"], 6)
-                ui.label("関節の最大加速度 [deg/s²]")
-                max_acc = joint_inputs(defaults["max_acc"], 6)
+                ui.label("関節の角度・速度・加速度制限は URDF の値を使用します").classes("text-sm text-gray-600")
                 with ui.grid(columns=2).classes("w-full").bind_visibility_from(mode, "value", backward=lambda m: m in ("lin", "rmp", "rmp_path", "rmp_track")):
                     lin_vel = ui.number("先端速度 [mm/s]", value=defaults["lin_vel"], min=0)
                     lin_acc = ui.number("先端加速度 [mm/s²]", value=defaults["lin_acc"], min=0)
@@ -102,7 +107,7 @@ async def index(request: Request):
                     dt = ui.number("周期 dt [s]", value=defaults["dt"], min=0.001, step=0.001, format="%.3f")
                     duration = ui.number("動作時間 [s]", min=0).props("hint=空欄なら制限内で最短").bind_visibility_from(mode, "value", backward=lambda m: m in ("ptp", "lin"))
 
-            # レーザートラッカー校正の測定動作・単軸動作。座標は base_link 基準 [mm]、ターゲット（SMR）の位置・ミラーの向きは tool0 座標
+            # レーザートラッカー校正の測定動作・単軸動作。ターゲット座標とミラー方向は robot-viser-app の /tool 設定を使う
             with ui.card().classes("w-full").bind_visibility_from(mode, "value", backward=lambda m: m in ("calib", "calib_axis")):
                 ui.label("測定動作").classes("text-lg font-bold")
                 with ui.grid(columns=3).classes("w-full"):
@@ -111,15 +116,7 @@ async def index(request: Request):
                     margin = ui.number("安全距離 [mm]", value=10, min=0).props('hint="障害物との距離"')
                 ui.label("トラッカーの位置 [mm]")
                 tracker = xyz_inputs([0, 2500, 800])
-                ui.label("ターゲットの位置（tool0 座標）[mm]")
-                target_offset = xyz_inputs([0, 0, 0])
-                ui.label("ターゲットのミラーの向き（tool0 座標）")
-                target_dir = xyz_inputs([0, 0, 1])
-                # 単軸動作はミラーがフランジ面と平行（tool0 の x 軸）に付く前提なので、モードに合わせて向きの初期値を切り替える
-                def default_dir(e):
-                    if e.value in ("calib", "calib_axis"):
-                        for n, v in zip(target_dir, [0, 0, 1] if e.value == "calib" else [1, 0, 0]): n.value = v
-                mode.on_value_change(default_dir)
+                ui.label("ターゲット座標とミラー方向は robot-viser-app の「ツール座標」設定を使用します").classes("text-sm text-gray-600")
                 # 測定点を置くエリア（ターゲット位置の範囲）。指定しなければ動作領域全体を使う（測定動作のみ）
                 with ui.column().classes("w-full").bind_visibility_from(mode, "value", value="calib"):
                     use_area = ui.checkbox("エリアを指定する")
@@ -128,18 +125,13 @@ async def index(request: Request):
                         area_min = xyz_inputs([-500, 400, 300])
                         ui.label("エリアの最大 [mm]")
                         area_max = xyz_inputs([500, 1200, 1300])
-                ui.label("可動範囲の下限 [deg]")
-                joint_min = joint_inputs(defaults["joint_min"])
-                ui.label("可動範囲の上限 [deg]")
-                joint_max = joint_inputs(defaults["joint_max"])
-                # 単軸動作で動かす軸（対象軸）、J2・J3 の動作範囲（5° 刻み）、測定中の速度、回転半径の下限（全候補の最大半径に対する比。伸ばし切り・縮こまりを避ける）
+                # 単軸動作で動かす軸、J2・J3 の動作区間幅、回転半径の下限（全候補の最大半径に対する比）
                 with ui.column().classes("w-full").bind_visibility_from(mode, "value", value="calib_axis"):
                     with ui.row().classes("items-center"):
                         ui.label("対象軸")
                         sweep_axes = [ui.checkbox(f"J{i}", value=True) for i in (1, 2, 3)]
                     with ui.grid(columns=3).classes("w-full"):
                         sweep_range = ui.number("動作範囲 [deg]", value=60, min=5, step=5, precision=0).props('hint="J2・J3。5 の倍数"')
-                        sweep_vel = ui.number("測定速度 [deg/s]", value=10, min=0.1)
                         radius_ratio = ui.number("回転半径の下限", value=0.7, min=0, max=1, step=0.05).props('hint="最大半径との比"')
 
             # 追従のターゲットの動き。目標位置の先端姿勢から動き出し、姿勢はそのままで位置だけが動く。追いついた後も追従時間まで追い続ける
@@ -155,39 +147,16 @@ async def index(request: Request):
                 track_dir = xyz_inputs([1, 0, 0])
 
             # 障害物回避（RMP・経路追従・追従）と測定動作の干渉チェック。障害物は robot-viser-app に登録し、その距離計算を使う（robot-viser-app を COLLISION=1 で起動しておく）
-            # 障害物は robot-viser-app の /obstacles と同じ JSON（座標は base_link 基準 [m]）で書く
             obstacles_res = await viser_api.get("/obstacles")
-            # 画面の障害物を robot-viser-app に送る。手で書く JSON なので、読めない・形式が違うときは理由を表示して False を返す
-            async def send_obstacles() -> bool:
-                try:
-                    obstacles = json.loads(obstacles_text.value or "[]")
-                except json.JSONDecodeError as e:
-                    ui.notify(f"障害物の JSON が読めません: {e}", type="negative")
-                    return False
-                res = await viser_api.post("/obstacles", json={"obstacles": obstacles})
-                if res.status_code == 422:
-                    ui.notify(f"障害物の形式が違います: {res.json()['detail']}", type="negative", multi_line=True)
-                    return False
-                res.raise_for_status()
-                return True
-            async def send_click():
-                if await send_obstacles(): ui.notify("障害物を robot-viser に送りました")
-            # 試しやすいよう、開始と目標の先端位置の中間に球を置く例を入れる
-            async def example_obstacle():
-                p = [(await client.post("/fk", json={"angles": [n.value for n in inputs]})).json()["position"] for inputs in (start, goal)]
-                obstacles_text.value = json.dumps([{"type": "sphere", "name": "ball", "center": [round((a + b) / 2000, 3) for a, b in zip(*p)], "radius": 0.06}], indent=1)
-            with ui.card().classes("w-full").bind_visibility_from(mode, "value", backward=lambda m: m in ("rmp", "rmp_path", "rmp_track", "calib", "calib_axis")):
+            with ui.card().classes("w-full").bind_visibility_from(mode, "value", backward=lambda m: m in ("rmp", "rmp_path", "rmp_track")):
                 ui.label("障害物").classes("text-lg font-bold")
                 if obstacles_res.status_code == 404:
                     ui.label("robot-viser-app の衝突判定が無効です（COLLISION=1 docker compose up -d で起動すると使えます）").classes("text-sm text-orange-700")
                 else:
+                    ui.label("別の経路で robot-viser-app に登録した障害物を使用します").classes("text-sm text-gray-600")
                     with ui.row().classes("items-center").bind_visibility_from(mode, "value", backward=lambda m: m not in ("calib", "calib_axis")):
                         avoid = ui.checkbox("障害物を避ける")
                         avoid_distance = ui.number("影響距離 [mm]", value=100, min=1).classes("w-32")
-                    obstacles_text = ui.textarea("障害物（JSON。座標は base_link 基準 [m]）", value=json.dumps(obstacles_res.json()["obstacles"], indent=1)).props("rows=6").classes("w-full font-mono text-xs")
-                    with ui.row():
-                        ui.button("viser に送る", on_click=send_click).props("flat no-caps")
-                        ui.button("例を入れる", on_click=example_obstacle).props("flat")
 
             # 軌道（CSV テキスト。ヘッダ t,joint1..6）を関節角度の時系列グラフにする
             def show_chart(csv: str) -> list[list[float]]:
@@ -197,13 +166,14 @@ async def index(request: Request):
                 chart.set_visibility(True)
                 return rows
 
-            # 測定動作を生成する。干渉チェックは robot-viser-app の近似球と障害物を使うので、画面の障害物を先に送る
+            # 測定動作を生成する。干渉チェックには robot-viser-app に登録済みの障害物を使う
             async def generate_calib():
                 if obstacles_res.status_code == 404: return ui.notify("測定動作の干渉チェックには robot-viser-app の衝突判定が必要です（COLLISION=1 docker compose up -d で起動してください）", type="negative", multi_line=True)
-                if not await send_obstacles(): return
-                req = {"num_points": int(num_points.value), "tracker": [n.value for n in tracker], "target_offset": [n.value for n in target_offset], "target_dir": [n.value for n in target_dir],
-                       "cone": cone.value, "margin": margin.value, "joint_min": [n.value for n in joint_min], "joint_max": [n.value for n in joint_max],
-                       "max_vel": [n.value for n in max_vel], "max_acc": [n.value for n in max_acc], "dt": dt.value}
+                tool = (await viser_api.get("/tool"))
+                tool.raise_for_status()
+                offset, direction = tool_target(tool.json())
+                req = {"num_points": int(num_points.value), "tracker": [n.value for n in tracker], "target_offset": offset, "target_dir": direction,
+                       "cone": cone.value, "margin": margin.value, "dt": dt.value}
                 if use_area.value: req.update(area_min=[n.value for n in area_min], area_max=[n.value for n in area_max])
                 notification = ui.notification("測定動作を生成中…", spinner=True, timeout=None)
                 res = await client.post("/calib", json=req, timeout=None)
@@ -222,13 +192,15 @@ async def index(request: Request):
                 (await viser_api.post("/shapes", json={"shapes": shapes})).raise_for_status()
                 ui.notify(f"測定点 {r['num_measure']} 点・経由点 {r['num_via']} 点、合計動作時間 {r['duration_sec']:.1f} 秒の測定動作を生成しました")
 
-            # 単軸動作を生成する。測定動作と同じく、画面の障害物を先に送る
+            # 単軸動作を生成する。測定動作と同じく、登録済みの障害物で干渉を確認する
             async def generate_calib_axis():
                 if obstacles_res.status_code == 404: return ui.notify("単軸動作の干渉チェックには robot-viser-app の衝突判定が必要です（COLLISION=1 docker compose up -d で起動してください）", type="negative", multi_line=True)
-                if not await send_obstacles(): return
-                req = {"tracker": [n.value for n in tracker], "target_offset": [n.value for n in target_offset], "target_dir": [n.value for n in target_dir], "cone": cone.value, "margin": margin.value,
-                       "joint_min": [n.value for n in joint_min], "joint_max": [n.value for n in joint_max], "max_vel": [n.value for n in max_vel], "max_acc": [n.value for n in max_acc], "dt": dt.value,
-                       "axes": [i for i, b in zip((1, 2, 3), sweep_axes) if b.value], "sweep_range": int(sweep_range.value), "sweep_vel": sweep_vel.value, "radius_ratio": radius_ratio.value}
+                tool = (await viser_api.get("/tool"))
+                tool.raise_for_status()
+                offset, direction = tool_target(tool.json())
+                req = {"tracker": [n.value for n in tracker], "target_offset": offset, "target_dir": direction, "cone": cone.value, "margin": margin.value,
+                       "dt": dt.value, "axes": [i for i, b in zip((1, 2, 3), sweep_axes) if b.value],
+                       "sweep_range": int(sweep_range.value), "radius_ratio": radius_ratio.value}
                 notification = ui.notification("単軸動作を生成中…", spinner=True, timeout=None)
                 res = await client.post("/calib/axis", json=req, timeout=None)
                 notification.dismiss()
@@ -250,14 +222,13 @@ async def index(request: Request):
             async def generate():
                 if mode.value == "calib": return await generate_calib()
                 if mode.value == "calib_axis": return await generate_calib_axis()
-                req = {"mode": mode.value, "start": [n.value for n in start], "via": [[n.value for n in v] for v in vias], "goal": [n.value for n in goal], "blend": blend.value, "max_vel": [n.value for n in max_vel],
-                       "max_acc": [n.value for n in max_acc], "lin_vel": lin_vel.value, "lin_acc": lin_acc.value, "rot_vel": rot_vel.value, "rot_acc": rot_acc.value,
+                req = {"mode": mode.value, "start": [n.value for n in start], "via": [[n.value for n in v] for v in vias], "goal": [n.value for n in goal], "blend": blend.value,
+                       "lin_vel": lin_vel.value, "lin_acc": lin_acc.value, "rot_vel": rot_vel.value, "rot_acc": rot_acc.value,
                        "dt": dt.value, "duration": duration.value, "track_motion": track_motion.value, "track_speed": track_speed.value, "track_dir": [n.value for n in track_dir],
                        "track_radius": track_radius.value, "track_time": track_time.value}
-                # 障害物を避けるときは、画面の障害物を robot-viser-app に送ってから生成する（表示と計算に使う障害物を揃える）
+                # 回避を有効にすると、robot-viser-app に登録済みの障害物を使う
                 use_avoid = obstacles_res.status_code != 404 and mode.value in ("rmp", "rmp_path", "rmp_track") and avoid.value
                 if use_avoid:
-                    if not await send_obstacles(): return
                     req.update(avoid=True, avoid_distance=avoid_distance.value)
                 # LIN・RMP は逆運動学が解けない経路や目標へ収束しない場合などに生成できないため、理由を表示する（時間がかかる経路もあるのでタイムアウトなし）
                 res = await client.post("/trajectory/csv", json=req, timeout=None)

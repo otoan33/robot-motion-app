@@ -73,10 +73,11 @@ def tour(C: list[list[float]]) -> list[int]:
 class Calib:
     """測定条件（トラッカー・ターゲット・エリア・可動範囲・安全距離・関節の速度と加速度）と、干渉を調べるロボットの近似球・障害物を持つ。"""
 
-    def __init__(self, tracker, target_offset, target_dir, cone, area, joint_min, joint_max, margin, max_vel, max_acc, seed):
+    def __init__(self, tracker, target_offset, target_dir, cone, area, margin, seed):
         self.tracker, self.offset, self.dir = np.array(tracker) / 1000, np.array(target_offset) / 1000, np.array(target_dir, float) / np.linalg.norm(target_dir)
         self.cone, self.margin, self.area = np.radians(cone), margin / 1000, None if area is None else np.array(area) / 1000
-        self.lo, self.hi, self.max_vel, self.max_acc = np.array(joint_min, float), np.array(joint_max, float), np.array(max_vel, float), np.array(max_acc, float)
+        self.lo, self.hi = np.array(arm.limits, float).T
+        self.max_vel, self.max_acc = np.array(arm.max_vel), np.array(arm.max_acc)
         self.rng = np.random.default_rng(seed)
         # 近似球は robot-viser-app から全軸 0° の中心を 1 回だけ取り、中心が動く最後の関節（ヤコビアンの列が 0 でない最後の関節）の先のリンク座標に直して手元で動かす（/distances を毎回呼ぶと遅いため）
         cps, frames = obstacles.control_points([0] * 6), arm.forward_many(np.zeros((1, 6)))[1][0]
@@ -217,8 +218,8 @@ class Calib:
 
 # 測定動作を作る。長さ [mm]・角度 [deg]。area は [[xmin, ymin, zmin], [xmax, ymax, zmax]]（None なら動作領域全体）
 # 返り値: 全ポイント（label: start / measure / via / end、関節角度、ターゲット位置 [mm]）と、それを PTP でつないだ軌道（時刻・関節角度）
-def plan_calib(num_points, tracker, target_offset, target_dir, cone, area, joint_min, joint_max, margin, max_vel, max_acc, dt, seed=0) -> dict:
-    c, home = Calib(tracker, target_offset, target_dir, cone, area, joint_min, joint_max, margin, max_vel, max_acc, seed), np.zeros(6)
+def plan_calib(num_points, tracker, target_offset, target_dir, cone, area, margin, dt, seed=0) -> dict:
+    c, home = Calib(tracker, target_offset, target_dir, cone, area, margin, seed), np.zeros(6)
     if c.clearance(c.poses(home[None])[0])[0] < 0: raise ValueError("全軸 0° の姿勢が障害物と干渉しています")
     # 条件を満たす候補を点数の 5 倍集め、ターゲット位置が空間に広がるよう選ぶ。全軸 0° から PTP で直接行ける点だけにする（どの 2 点の間も、全軸 0° を経由すれば必ず干渉せずにつなげる）
     found = c.candidates(5 * num_points, 300 * num_points)
@@ -249,7 +250,7 @@ def plan_calib(num_points, tracker, target_offset, target_dir, cone, area, joint
     # 再生・確認用に、全ポイントを PTP（各点で停止）でつないだ軌道にする
     times, angles = [0.0], [home.tolist()]
     for (_, a, _), (_, b, _) in zip(rows[:-1], rows[1:]):
-        ts, qs = plan_ptp(a, b, max_vel, max_acc, dt)
+        ts, qs = plan_ptp(a, b, dt)
         times += [times[-1] + ti for ti in ts[1:]]
         angles += qs[1:]
     points = [{"label": label, "angles": q.tolist(), "position": ((c.poses(q[None])[1][0] if p is None else p) * 1000).tolist()} for label, q, p in rows]
@@ -312,8 +313,8 @@ def choose(c: Calib, S, j: int, span: int, R, ratio: float):
 # J2・J3 動作: J4=J5=0 で J2（J3）を sweep_range 動かす。J1 は共通で、J2・J3 の回転軸がトラッカーを向くよう腕の面を横に向ける
 # J1 動作: フランジ下向き（tool0 z が鉛直下向き）・J4=0 で J1 を 30° ×5 区間動かす。J2〜J5 は共通で、J6 だけ区間ごとにミラーをトラッカーへ向け直す
 # 返り値: 動作の列（label: move / measure、axis、始点・終点の関節角度とターゲット位置 [mm]）、再生用の軌道、measure 区間のターゲット軌跡（1° ごと [mm]）、各軸の回転半径 [mm]
-def plan_calib_axis(tracker, target_offset, target_dir, cone, joint_min, joint_max, margin, max_vel, max_acc, dt, seed=0, axes=(1, 2, 3), sweep_range=60, sweep_vel=10.0, radius_ratio=0.7) -> dict:
-    c, home = Calib(tracker, target_offset, target_dir, cone, None, joint_min, joint_max, margin, max_vel, max_acc, seed), np.zeros(6)
+def plan_calib_axis(tracker, target_offset, target_dir, cone, margin, dt, seed=0, axes=(1, 2, 3), sweep_range=60, radius_ratio=0.7) -> dict:
+    c, home = Calib(tracker, target_offset, target_dir, cone, None, margin, seed), np.zeros(6)
     if c.clearance(c.poses(home[None])[0])[0] < 0: raise ValueError("全軸 0° の姿勢が障害物と干渉しています")
     c.free_poses, measures, radii = [], [], {}
     # 格子は可動範囲内の 5 の倍数。トラッカーの方位角 phi は base_link の x 軸から（全軸 0° の腕は phi=90° の向き）
@@ -372,12 +373,10 @@ def plan_calib_axis(tracker, target_offset, target_dir, cone, joint_min, joint_m
         rows += [("move", None, p, q) for p, q in zip(path[:-1], path[1:]) if np.any(p != q)]
         if ax is not None: rows.append(("measure", ax, a, b)); cur = b
 
-    # 再生用の軌道。測定区間は、動かす軸の速度を sweep_vel に抑える
+    # 再生用の軌道。全関節の速度・加速度制限は URDF の値を使う
     times, angles = [0.0], [home.tolist()]
     for label, ax, a, b in rows:
-        vel = np.array(max_vel, float)
-        if label == "measure": vel[ax - 1] = min(vel[ax - 1], sweep_vel)
-        ts, qs = plan_ptp(a, b, vel, max_acc, dt)
+        ts, qs = plan_ptp(a, b, dt)
         times += [times[-1] + t for t in ts[1:]]
         angles += qs[1:]
     pos = lambda q: (c.poses(np.array(q)[None])[1][0] * 1000).tolist()

@@ -31,7 +31,7 @@
     <child link="link1"/>
     <origin xyz="0 0 0.2515" rpy="0 0 1.5708"/>
     <axis xyz="0 0 1"/>
-    <limit lower="-3.14" upper="3.14" effort="1" velocity="1"/>
+    <limit lower="-3.14" upper="3.14" effort="1" velocity="1" acceleration="2"/>
   </joint>
 
   <link name="link2">
@@ -48,7 +48,7 @@
     <child link="link2"/>
     <origin xyz="0.1 0 0.225" rpy="0 0 0"/>
     <axis xyz="0 -1 0"/>
-    <limit lower="-3.14" upper="3.14" effort="1" velocity="1"/>
+    <limit lower="-3.14" upper="3.14" effort="1" velocity="1" acceleration="2"/>
   </joint>
 
   <link name="link3">
@@ -65,7 +65,7 @@
     <child link="link3"/>
     <origin xyz="0 0 0.65" rpy="0 0 0"/>
     <axis xyz="0 -1 0"/>
-    <limit lower="-3.14" upper="3.14" effort="1" velocity="1"/>
+    <limit lower="-3.14" upper="3.14" effort="1" velocity="1" acceleration="2"/>
   </joint>
 
   <link name="link4">
@@ -82,7 +82,7 @@
     <child link="link4"/>
     <origin xyz="0.0985 0 0.03" rpy="0 0 0"/>
     <axis xyz="-1 0 0"/>
-    <limit lower="-3.14" upper="3.14" effort="1" velocity="1"/>
+    <limit lower="-3.14" upper="3.14" effort="1" velocity="1" acceleration="2"/>
   </joint>
 
   <link name="link5">
@@ -99,7 +99,7 @@
     <child link="link5"/>
     <origin xyz="0.55515 0 0" rpy="0 0 0"/>
     <axis xyz="0 -1 0"/>
-    <limit lower="-3.14" upper="3.14" effort="1" velocity="1"/>
+    <limit lower="-3.14" upper="3.14" effort="1" velocity="1" acceleration="2"/>
   </joint>
 
   <link name="link6">
@@ -117,7 +117,7 @@
     <child link="link6"/>
     <origin xyz="0.0478 0 0" rpy="0 0 0"/>
     <axis xyz="-1 0 0"/>
-    <limit lower="-3.14" upper="3.14" effort="1" velocity="1"/>
+    <limit lower="-3.14" upper="3.14" effort="1" velocity="1" acceleration="2"/>
   </joint>
 
   

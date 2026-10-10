@@ -1,0 +1,137 @@
+<?xml version="1.0"?>
+<robot name="X">
+
+  <material name="blue">
+    <color rgba="0.0 0.0 1.0 1.0"/>
+  </material>
+  <material name="gray">
+    <color rgba="0.9 0.9 0.9 1.0"/>
+  </material>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 -1.5708"/>
+      <geometry>
+        <mesh filename="X_base.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="gray"/>
+    </visual>
+  </link>
+
+  <link name="link1">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 3.1416"/>
+      <geometry>
+        <mesh filename="X_arm1.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="gray"/>
+    </visual>
+  </link>
+
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0.176" rpy="0 0 1.5708"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.35619449" upper="2.35619449" effort="1" velocity="1" acceleration="2"/>
+  </joint>
+
+  <link name="link2">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 3.1416"/>
+      <geometry>
+        <mesh filename="X_arm2.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="gray"/>
+    </visual>
+  </link>
+
+  <joint name="joint2" type="revolute">
+    <parent link="link1"/>
+    <child link="link2"/>
+    <origin xyz="0.06 0 0.144" rpy="0 0 0"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-0.95993109" upper="1.16937060" effort="1" velocity="1" acceleration="2"/>
+  </joint>
+
+  <link name="link3">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 3.1416"/>
+      <geometry>
+        <mesh filename="X_arm3.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="gray"/>
+    </visual>
+  </link>
+
+  <joint name="joint3" type="revolute">
+    <parent link="link2"/>
+    <child link="link3"/>
+    <origin xyz="0 0 0.26" rpy="0 0 0"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-0.87266463" upper="3.14159265" effort="1" velocity="1" acceleration="2"/>
+  </joint>
+
+  <link name="link4">
+    <visual>
+      <origin xyz="0.202 0 0" rpy="1.5708 0 3.1416"/>
+      <geometry>
+        <mesh filename="X_arm4.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="gray"/>
+    </visual>
+  </link>
+
+  <joint name="joint4" type="revolute">
+    <parent link="link3"/>
+    <child link="link4"/>
+    <origin xyz="0.078 0 0.03" rpy="0 0 0"/>
+    <axis xyz="-1 0 0"/>
+    <limit lower="-4.71238898" upper="4.71238898" effort="1" velocity="1" acceleration="2"/>
+  </joint>
+
+  <link name="link5">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 3.1416"/>
+      <geometry>
+        <mesh filename="X_arm5.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="blue"/>
+    </visual>
+  </link>
+
+  <joint name="joint5" type="revolute">
+    <parent link="link4"/>
+    <child link="link5"/>
+    <origin xyz="0.202 0 0" rpy="0 0 0"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-2.35619449" upper="2.35619449" effort="1" velocity="1" acceleration="2"/>
+  </joint>
+
+  <link name="link6">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 3.1416 -1.5708"/>
+      <geometry>
+        <mesh filename="X_arm6.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="gray"/>
+    </visual>
+  </link>
+
+  <joint name="joint6" type="revolute">
+    <parent link="link5"/>
+    <child link="link6"/>
+    <origin xyz="0.0575 0 0" rpy="0 0 0"/>
+    <axis xyz="-1 0 0"/>
+    <limit lower="-9.42477796" upper="9.42477796" effort="1" velocity="1" acceleration="2"/>
+  </joint>
+
+  <link name="tool0"/>
+
+  <joint name="joint_end" type="fixed">
+    <parent link="link6"/>
+    <child link="tool0"/>
+    <origin xyz="0.015 0 0" rpy="3.1416 -1.5708 0"/>
+  </joint>
+
+</robot>
