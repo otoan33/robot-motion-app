@@ -69,6 +69,10 @@ frontend の接続先は環境変数で変えられる。
 docker compose up -d --build
 ```
 
+`backend/` と `frontend/` はコンテナにバインドマウントしているため、コードの変更にビルドは要らない。backend は `uvicorn --reload` で保存すると自動で再読み込みされる。frontend は `docker compose restart frontend` で反映する。compose.yaml を書き換えたときは `docker compose up -d --no-build --pull never` を実行する。
+
+オフラインでも、`requirements.txt` を変えていなければビルドは通る（`pip install` の層はキャッシュから使われる）。`python:3.12-slim` のメタデータ取得で失敗する場合は、`docker buildx use default` で docker ドライバの builder にするか、`DOCKER_BUILDKIT=0 docker compose build` でレガシービルダーを使う。`requirements.txt` を変えた場合は `pip install` が再実行されるため、オフラインではビルドできない。
+
 - 画面: http://localhost:8180
 - API: http://localhost:8100（ドキュメント: http://localhost:8100/docs）
 

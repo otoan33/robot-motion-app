@@ -2,6 +2,8 @@
 services:
   backend:
     build: ./backend
+    # オフラインでも起動できるよう、python イメージをレジストリに取りに行かない
+    pull_policy: never
     ports:
       - "8100:8100"
     environment:
@@ -9,10 +11,16 @@ services:
       VISER_API_URL: http://host.docker.internal:8000
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # COPY したコードをホスト側で上書きし、コード変更のたびにビルドしなくて済むようにする
+    volumes:
+      - ./backend:/app/backend
+    # 保存したコードを自動で再読み込みする
+    command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8100", "--reload"]
     restart: unless-stopped
 
   frontend:
     build: ./frontend
+    pull_policy: never
     ports:
       - "8180:8180"
     environment:
@@ -21,6 +29,9 @@ services:
       VISER_API_URL: http://host.docker.internal:8000
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # コード変更は docker compose restart frontend で反映する
+    volumes:
+      - ./frontend:/app/frontend
     depends_on:
       - backend
     restart: unless-stopped
