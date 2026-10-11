@@ -22,11 +22,12 @@ def trapezoid(kv: float, ka: float, dt: float, duration: float | None = None) ->
     return t, np.where(t < ta, a * t**2 / 2, np.where(t < T - ta, a * ta * (t - ta / 2), 1 - a * (T - t) ** 2 / 2))
 
 
-# 関節角度が URDF の可動範囲内にあることを確認する
+# 関節角度の個数がアームの軸数と合い、URDF の可動範囲内にあることを確認する
 def check_joint_limits(*angles, robot_arm: Arm | None = None) -> None:
     limits = np.asarray((robot_arm or arm).limits)
     for q in angles:
         q = np.asarray(q, float)
+        if len(q) != len(limits): raise ValueError(f"関節角度の個数 {len(q)} がアームの軸数 {len(limits)} と合いません")
         if not np.isfinite(q).all() or np.any(q < limits[:, 0]) or np.any(q > limits[:, 1]):
             raise ValueError(f"関節角度が URDF の可動範囲を超えています: {q.tolist()} [deg]")
 
@@ -42,11 +43,12 @@ def plan_ptp(start, goal, dt: float, duration: float | None = None, robot_arm: A
 
 
 # LIN（直線補間）。先端（tool0）の位置を直線で、姿勢を一定の回転軸まわりに補間し、各時刻の関節角度を逆運動学で求める
-# 先端制限と URDF の関節速度・加速度の上限を守る
-def plan_lin(start, goal, lin_vel, lin_acc, rot_vel, rot_acc, dt: float, duration: float | None = None) -> tuple[list[float], list[list[float]]]:
-    check_joint_limits(start, goal)
-    q0 = np.radians(start)
-    T0, T1 = arm.forward(q0)[0], arm.forward(np.radians(goal))[0]
+# 先端制限と URDF の関節速度・加速度の上限を守る。7軸など冗長なアームでは、先端姿勢を変えない動きで関節角度を開始→目標の関節補間に寄せ、目標の関節角度に着くようにする
+def plan_lin(start, goal, lin_vel, lin_acc, rot_vel, rot_acc, dt: float, duration: float | None = None, robot_arm: Arm | None = None) -> tuple[list[float], list[list[float]]]:
+    robot_arm = robot_arm or arm
+    check_joint_limits(start, goal, robot_arm=robot_arm)
+    q0, qg = np.radians(start), np.radians(goal)
+    T0, T1 = robot_arm.forward(q0)[0], robot_arm.forward(qg)[0]
     # 移動距離 [mm] と姿勢の回転（軸 × 角度）
     dp, w = (T1[:3, 3] - T0[:3, 3]) * 1000, rotvec(T1[:3, :3] @ T0[:3, :3].T)
     L, theta = np.linalg.norm(dp), np.degrees(np.linalg.norm(w))
@@ -58,9 +60,9 @@ def plan_lin(start, goal, lin_vel, lin_acc, rot_vel, rot_acc, dt: float, duratio
         for si in s:
             target = np.eye(4)
             target[:3, :3], target[:3, 3] = rotation(w / (np.linalg.norm(w) or 1), si * np.linalg.norm(w)) @ T0[:3, :3], T0[:3, 3] + si * dp / 1000
-            q, err = arm.inverse(target, q)
+            q, err = robot_arm.inverse(target, q, q_ref=q0 + si * (qg - q0))
             if err > 1e-6: raise ValueError(f"直線経路上で逆運動学が解けません（s={si:.3f}、特異点または可動範囲外）")
-            if np.any(q < np.radians(np.array(arm.limits)[:, 0]) - 1e-8) or np.any(q > np.radians(np.array(arm.limits)[:, 1]) + 1e-8):
+            if np.any(q < np.radians(np.array(robot_arm.limits)[:, 0]) - 1e-8) or np.any(q > np.radians(np.array(robot_arm.limits)[:, 1]) + 1e-8):
                 raise ValueError(f"直線経路上で関節の可動範囲を超えます（s={si:.3f}）")
             qs.append(q)
         return np.degrees(qs)
@@ -70,7 +72,7 @@ def plan_lin(start, goal, lin_vel, lin_acc, rot_vel, rot_acc, dt: float, duratio
     # 関節の速度・加速度の上限に対する超過率。時間を r 倍に引き延ばすと速度は 1/r、加速度は 1/r² になる
     if len(t) > 2:
         v = np.gradient(q, t, axis=0)
-        r = max(np.max(np.abs(v) / arm.max_vel), np.sqrt(np.max(np.abs(np.gradient(v, t, axis=0)) / arm.max_acc)))
+        r = max(np.max(np.abs(v) / robot_arm.max_vel), np.sqrt(np.max(np.abs(np.gradient(v, t, axis=0)) / robot_arm.max_acc)))
         if r > 1:
             t, s = trapezoid(kv * r, ka * r**2, dt, duration)
             q = solve(s)
@@ -80,6 +82,6 @@ def plan_lin(start, goal, lin_vel, lin_acc, rot_vel, rot_acc, dt: float, duratio
 
 
 # 関節角度 [deg] での先端の位置 [mm] と姿勢 roll / pitch / yaw [deg]
-def tcp_pose(angles) -> tuple[list[float], list[float]]:
-    T = arm.forward(np.radians(angles))[0]
+def tcp_pose(angles, robot_arm: Arm | None = None) -> tuple[list[float], list[float]]:
+    T = (robot_arm or arm).forward(np.radians(angles))[0]
     return (T[:3, 3] * 1000).tolist(), np.degrees(matrix_rpy(T[:3, :3])).tolist()

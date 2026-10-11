@@ -31,10 +31,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from backend.kinematics import load_arm  # noqa: E402
 from backend.planner import tcp_pose  # noqa: E402
 
-# robot-motion-app の API は、環境変数 MOTION_URL で別のポートのもの（開発中のコードで起動したものなど）に変えられる
-MOTION_URL, VISER_API_URL, VISER_URL = os.environ.get("MOTION_URL", "http://127.0.0.1:8100"), "http://127.0.0.1:8000", "http://127.0.0.1:8081"
+# robot-motion-app の API は、環境変数 MOTION_URL で別のポートのもの（開発中のコードで起動したものなど）に変えられる。robot-viser-app の API・viser 画面も VISER_API_URL・VISER_URL で変えられる
+MOTION_URL = os.environ.get("MOTION_URL", "http://127.0.0.1:8100")
+VISER_API_URL, VISER_URL = os.environ.get("VISER_API_URL", "http://127.0.0.1:8000"), os.environ.get("VISER_URL", "http://127.0.0.1:8081")
 OUT = Path("docs/videos")
 FPS, RENDER_W, PANEL_W, H = 20, 800, 480, 720
 FONT = "/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf"
@@ -42,6 +44,8 @@ plt.rcParams["font.family"] = "IPAGothic"
 
 # サンプルの姿勢（関節角度 [deg]）。PTP・LIN・RMP は同じ A→B→C→A をつなげて、ポリシーの違いを比べられるようにする
 A, B, C = [0, -20, 30, 0, 40, 0], [40, -10, 20, 0, 60, 30], [-35, 5, 10, 0, 45, -30]
+# 7 軸アーム（arm7）の姿勢。S1 → G1 は画面の初期値、S2 → G2 は障害物をはさんで J1 を 90° 回す、S3 → G3 は肘を前に出して J1 を ±60° 振る
+S1, G1, S2, G2, S3, G3 = [0, 30, 0, -60, 0, 45, 0], [40, 20, 30, -70, 20, 50, 30], [0, 30, 0, -60, 0, 45, 0], [90, 30, 0, -60, 0, 45, 0], [-60, 50, 0, -60, 0, 45, 0], [60, 50, 0, -60, 0, 45, 0]
 
 
 # 測定動作の障害物（床と、ロボットの横の台）
@@ -106,9 +110,18 @@ VIDEOS = [
      [("直線 +X 方向・100 mm/s（コンベア）", {"mode": "rmp_track", "start": A, "goal": B, "track_motion": "line", "track_speed": 100, "track_time": 8}, []),
       ("円 半径 150 mm・150 mm/s", {"mode": "rmp_track", "start": A, "goal": B, "track_motion": "circle", "track_speed": 150, "track_time": 8}, []),
       ("円 半径 150 mm・300 mm/s", {"mode": "rmp_track", "start": A, "goal": B, "track_motion": "circle", "track_speed": 300, "track_time": 8}, [])]),
+    # 7 軸アームは、生成条件の arm で robot-viser-app の表示もそのアームに切り替えて撮る
+    ("08_arm7", "7 軸アーム（arm7）", "先端の姿勢を変えずに肘を回す余った自由度を、目標の関節角度へ寄せる。障害物は肘を回して避けることもある",
+     [("PTP S1 → G1", {"arm": "arm7", "mode": "ptp", "start": S1, "goal": G1}, []),
+      ("LIN S1 → G1（先端は直線、肘は関節補間に寄せる）", {"arm": "arm7", "mode": "lin", "start": S1, "goal": G1, "lin_vel": 250, "lin_acc": 500}, []),
+      ("RMP 目標到達 S1 → G1", {"arm": "arm7", "mode": "rmp", "start": S1, "goal": G1}, []),
+      ("RMP＋回避 S2 → G2：PTP の途中の球", {"arm": "arm7", "mode": "rmp", "start": S2, "goal": G2, "avoid": True},
+       [{"type": "sphere", "name": "ball", "center": [0.384, 0.388, 0.532], "radius": 0.05}]),
+      ("経路追従＋回避 S3 → G3：肘の上の球", {"arm": "arm7", "mode": "rmp_path", "start": S3, "goal": G3, "avoid": True},
+       [{"type": "sphere", "name": "ball", "center": [0.064, -0.021, 0.763], "radius": 0.05}])]),
 ]
-# 測定動作の動画は、2.5 m 先のトラッカーまで写るよう、ほかの動画より引いて撮る（ホイールの回数）
-ZOOM_OUT = {"06_calib": 7}
+# 測定動作の動画は、2.5 m 先のトラッカーまで写るよう、ほかの動画より引いて撮る。7 軸アームは小さいので寄って撮る（ホイールの回数。負なら寄る）
+ZOOM_OUT = {"06_calib": 7, "08_arm7": -4}
 
 
 # 生成した CSV（t 形式）→ 時刻 [s] と関節角度 [deg]
@@ -120,8 +133,8 @@ def parse(text: str) -> tuple[np.ndarray, np.ndarray]:
 # 右側のパネル（関節角度と、先端の速さまたは障害物との距離の時系列）を描き、時刻 → 横位置 [px] の変換と一緒に返す
 def draw_panel(t, q, metric, metric_label) -> tuple[Image.Image, callable]:
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(PANEL_W / 100, H / 100), dpi=100, sharex=True, gridspec_kw={"height_ratios": [3, 2]})
-    for j in range(6): ax1.plot(t, q[:, j], label=f"J{j + 1}", lw=1.5)
-    ax1.set_ylabel("関節角度 [deg]"), ax1.legend(ncol=3, fontsize=8, loc="best"), ax1.grid(alpha=0.3)
+    for j in range(q.shape[1]): ax1.plot(t, q[:, j], label=f"J{j + 1}", lw=1.5)
+    ax1.set_ylabel("関節角度 [deg]"), ax1.legend(ncol=4, fontsize=8, loc="best"), ax1.grid(alpha=0.3)
     ax2.plot(t, metric, color="#444", lw=1.5)
     if "距離" in metric_label: ax2.axhline(0, color="#d33", lw=1, ls="--")
     ax2.set_ylabel(metric_label), ax2.set_xlabel("t [s]"), ax2.grid(alpha=0.3)
@@ -186,7 +199,12 @@ def main():
             print(f"== {no}. {title}", flush=True)
             frames = [title_card(title, desc, [s for s, _, _ in samples])] * (FPS * 3)
             if page and name in ZOOM_OUT:
-                for _ in range(ZOOM_OUT[name]): page.mouse.wheel(0, 150); page.wait_for_timeout(300)
+                for _ in range(abs(ZOOM_OUT[name])): page.mouse.wheel(0, int(np.sign(ZOOM_OUT[name])) * 150); page.wait_for_timeout(300)
+            # 生成条件のアームが表示中と違えば robot-viser-app の表示を切り替え、動画を作り終えたら元の構成に戻す
+            current, arm = viser.get("/robots").json()["current"], samples[0][1].get("arm", "robotA")
+            if arm != current["arm"]:
+                viser.post("/robot", json={"arm": arm}).raise_for_status()
+                if page: page.wait_for_timeout(3000)
             for i, (label, req, obstacles) in enumerate(samples, 1):
                 # 障害物を登録してから生成する（回避の計算と録画の表示に使う）
                 viser.post("/obstacles", json={"obstacles": obstacles}).raise_for_status()
@@ -219,13 +237,13 @@ def main():
                     metric_label, dmin = "障害物との最小距離 [mm]（根元を除く）", f"{metric.min():.1f}"
                 elif track is not None:
                     # 右のパネルの下段は、先端とターゲットの距離（ターゲットの位置は 0.1 秒ごとなので時刻で補間する）
-                    P, tt = np.array([tcp_pose(a)[0] for a in q]), np.minimum(np.arange(len(track)) * 0.1, t[-1])
+                    P, tt = np.array([tcp_pose(a, load_arm(arm))[0] for a in q]), np.minimum(np.arange(len(track)) * 0.1, t[-1])
                     metric, metric_label = np.linalg.norm(P - np.stack([np.interp(t, tt, track[:, k]) for k in range(3)], 1), axis=1), "ターゲットとの距離 [mm]"
                 elif obstacles:
                     metric = np.array([viser.post("/distances", json={"angles": list(a)}).json()["min_distance"] * 1000 for a in q])
                     metric_label = "障害物との最小距離 [mm]"
                 else:
-                    P = np.array([tcp_pose(a)[0] for a in q])
+                    P = np.array([tcp_pose(a, load_arm(arm))[0] for a in q])
                     metric, metric_label = np.linalg.norm(np.gradient(P, t, axis=0), axis=1), "先端の速さ [mm/s]"
                 panel, to_px = draw_panel(t, q, metric, metric_label)
 
@@ -251,8 +269,11 @@ def main():
                 frames += [frames[-1]] * FPS
             viser.post("/obstacles", json={"obstacles": []}).raise_for_status()
             viser.post("/shapes", json={"shapes": []}).raise_for_status()
+            if arm != current["arm"]:
+                viser.post("/robot", json=current).raise_for_status()
+                if page: page.wait_for_timeout(3000)
             if page and name in ZOOM_OUT:
-                for _ in range(ZOOM_OUT[name]): page.mouse.wheel(0, -150); page.wait_for_timeout(300)
+                for _ in range(abs(ZOOM_OUT[name])): page.mouse.wheel(0, -int(np.sign(ZOOM_OUT[name])) * 150); page.wait_for_timeout(300)
             if args.dry_run: continue
             path = OUT / f"{name}.mp4"
             imageio.mimwrite(path, frames, fps=FPS, quality=7, macro_block_size=8)

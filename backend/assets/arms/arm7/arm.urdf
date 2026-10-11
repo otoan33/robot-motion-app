@@ -1,0 +1,157 @@
+<?xml version="1.0"?>
+<!-- 動作確認用の 7 軸アーム（KUKA iiwa 風の S-R-S 構成）。メッシュを使わず円柱・箱だけで形を作る -->
+<robot name="arm7">
+
+  <material name="gray">
+    <color rgba="0.85 0.85 0.85 1.0"/>
+  </material>
+  <material name="orange">
+    <color rgba="1.0 0.5 0.1 1.0"/>
+  </material>
+  <material name="dark">
+    <color rgba="0.3 0.3 0.3 1.0"/>
+  </material>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.05" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.09" length="0.1"/></geometry>
+      <material name="dark"/>
+    </visual>
+  </link>
+
+  <!-- J1: 旋回 -->
+  <link name="link1">
+    <visual>
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.065" length="0.2"/></geometry>
+      <material name="gray"/>
+    </visual>
+  </link>
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0.1" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.967" upper="2.967" effort="1" velocity="1" acceleration="2"/>
+  </joint>
+
+  <!-- J2: 肩の曲げ -->
+  <link name="link2">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.07" length="0.16"/></geometry>
+      <material name="orange"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.075" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.06" length="0.15"/></geometry>
+      <material name="gray"/>
+    </visual>
+  </link>
+  <joint name="joint2" type="revolute">
+    <parent link="link1"/>
+    <child link="link2"/>
+    <origin xyz="0 0 0.2" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.094" upper="2.094" effort="1" velocity="1" acceleration="2"/>
+  </joint>
+
+  <!-- J3: 上腕のひねり -->
+  <link name="link3">
+    <visual>
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.055" length="0.2"/></geometry>
+      <material name="gray"/>
+    </visual>
+  </link>
+  <joint name="joint3" type="revolute">
+    <parent link="link2"/>
+    <child link="link3"/>
+    <origin xyz="0 0 0.15" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.967" upper="2.967" effort="1" velocity="1" acceleration="2"/>
+  </joint>
+
+  <!-- J4: 肘の曲げ -->
+  <link name="link4">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.06" length="0.14"/></geometry>
+      <material name="orange"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.075" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.05" length="0.15"/></geometry>
+      <material name="gray"/>
+    </visual>
+  </link>
+  <joint name="joint4" type="revolute">
+    <parent link="link3"/>
+    <child link="link4"/>
+    <origin xyz="0 0 0.2" rpy="0 0 0"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-2.094" upper="2.094" effort="1" velocity="1" acceleration="2"/>
+  </joint>
+
+  <!-- J5: 前腕のひねり -->
+  <link name="link5">
+    <visual>
+      <origin xyz="0 0 0.075" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.045" length="0.15"/></geometry>
+      <material name="gray"/>
+    </visual>
+  </link>
+  <joint name="joint5" type="revolute">
+    <parent link="link4"/>
+    <child link="link5"/>
+    <origin xyz="0 0 0.15" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.967" upper="2.967" effort="1" velocity="1" acceleration="2"/>
+  </joint>
+
+  <!-- J6: 手首の曲げ -->
+  <link name="link6">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.05" length="0.11"/></geometry>
+      <material name="orange"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.04" rpy="0 0 0"/>
+      <geometry><box size="0.07 0.07 0.08"/></geometry>
+      <material name="gray"/>
+    </visual>
+  </link>
+  <joint name="joint6" type="revolute">
+    <parent link="link5"/>
+    <child link="link6"/>
+    <origin xyz="0 0 0.15" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.094" upper="2.094" effort="1" velocity="1" acceleration="2"/>
+  </joint>
+
+  <!-- J7: フランジの回転 -->
+  <link name="link7">
+    <visual>
+      <origin xyz="0 0 0.01" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.04" length="0.02"/></geometry>
+      <material name="dark"/>
+    </visual>
+  </link>
+  <joint name="joint7" type="revolute">
+    <parent link="link6"/>
+    <child link="link7"/>
+    <origin xyz="0 0 0.08" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.054" upper="3.054" effort="1" velocity="1" acceleration="2"/>
+  </joint>
+
+  <link name="tool0"/>
+  <joint name="joint_end" type="fixed">
+    <parent link="link7"/>
+    <child link="tool0"/>
+    <origin xyz="0 0 0.02" rpy="0 0 0"/>
+  </joint>
+
+</robot>

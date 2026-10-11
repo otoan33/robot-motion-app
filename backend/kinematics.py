@@ -1,4 +1,4 @@
-"""URDF の関節定義から、6軸アームの順運動学・逆運動学を求める。座標は base_link（= viser のワールド）基準、長さは m、角度は rad。"""
+"""URDF の関節定義から、アーム（6軸・7軸など）の順運動学・逆運動学を求める。座標は base_link（= viser のワールド）基準、長さは m、角度は rad。"""
 import xml.etree.ElementTree as ET
 from functools import lru_cache
 from pathlib import Path
@@ -59,7 +59,7 @@ class Arm:
                 i += 1
         return T, axes
 
-    # forward を多くの関節角度 q (K,6)[rad] でまとめて計算する（干渉チェックで多くの姿勢を一度に調べる用）。先端の変換 (K,4,4) と、根元と各可動関節より先のリンクの座標系 (K,7,4,4)（frames[:, 0] が根元、frames[:, i] が関節 i の先）
+    # forward を多くの関節角度 q (K,n)[rad] でまとめて計算する（干渉チェックで多くの姿勢を一度に調べる用）。先端の変換 (K,4,4) と、根元と各可動関節より先のリンクの座標系 (K,n+1,4,4)（frames[:, 0] が根元、frames[:, i] が関節 i の先）
     def forward_many(self, q) -> tuple[np.ndarray, np.ndarray]:
         T, i = np.broadcast_to(np.eye(4), (len(q), 4, 4)), 0
         frames = [T]
@@ -73,27 +73,29 @@ class Arm:
                 i += 1
         return T, np.stack(frames, 1)
 
-    # jacobian を多くの関節角度 q (K,6)[rad] でまとめて計算する。先端の変換 (K,4,4) と幾何ヤコビアン (K,6,6)
+    # jacobian を多くの関節角度 q (K,n)[rad] でまとめて計算する。先端の変換 (K,4,4) と幾何ヤコビアン (K,6,n)
     def jacobian_many(self, q) -> tuple[np.ndarray, np.ndarray]:
         T, frames = self.forward_many(q)
-        # 各関節の回転軸・位置（ワールド座標）を列に並べる (K,3,6)
+        # 各関節の回転軸・位置（ワールド座標）を列に並べる (K,3,n)
         A = np.stack([frames[:, i + 1, :3, :3] @ axis for i, axis in enumerate(a for _, a in self.joints if a is not None)], 2)
         O = frames[:, 1:, :3, 3].transpose(0, 2, 1)
         return T, np.concatenate([np.cross(A, T[:, :3, 3, None] - O, axis=1), A], 1)
 
-    # 先端の 4x4 変換と幾何ヤコビアン（6x6。上3行が並進速度、下3行が角速度。各列: 回転軸 × 関節から先端へのベクトル、回転軸）
+    # 先端の 4x4 変換と幾何ヤコビアン（6×軸数。上3行が並進速度、下3行が角速度。各列: 回転軸 × 関節から先端へのベクトル、回転軸）
     def jacobian(self, q) -> tuple[np.ndarray, np.ndarray]:
         T, axes = self.forward(q)
         return T, np.array([np.concatenate([np.cross(a, T[:3, 3] - p), a]) for p, a in axes]).T
 
     # 目標の先端姿勢 target（4x4）になる関節角度を、初期値 q から減衰最小二乗法で探す。誤差（位置 m・回転 rad のノルム）も返す
-    def inverse(self, target: np.ndarray, q, iters: int = 50, damping: float = 1e-3) -> tuple[np.ndarray, float]:
+    # 7軸など冗長なアームでは、先端姿勢を変えない動き（ヌル空間）で関節角度を q_ref に寄せ、肘の位置などを一意に決める（6軸ではヌル空間がないので効かない）
+    def inverse(self, target: np.ndarray, q, iters: int = 50, damping: float = 1e-3, q_ref=None) -> tuple[np.ndarray, float]:
         q = np.array(q, float)
         for _ in range(iters):
             T, J = self.jacobian(q)
             e = np.concatenate([target[:3, 3] - T[:3, 3], rotvec(target[:3, :3] @ T[:3, :3].T)])
-            if np.linalg.norm(e) < 1e-10: break
-            q += J.T @ np.linalg.solve(J @ J.T + damping**2 * np.eye(6), e)
+            null = (np.eye(len(q)) - np.linalg.pinv(J) @ J) @ (q_ref - q) if q_ref is not None and len(q) > 6 else 0
+            if np.linalg.norm(e) < 1e-10 and np.linalg.norm(null) < 1e-10: break
+            q += J.T @ np.linalg.solve(J @ J.T + damping**2 * np.eye(6), e) + null
         return q, float(np.linalg.norm(e))
 
 

@@ -7,7 +7,7 @@
 """
 import numpy as np
 
-from backend.kinematics import rotvec
+from backend.kinematics import Arm, rotvec
 from backend.obstacles import distances
 from backend.path import Path
 from backend.planner import arm, check_joint_limits
@@ -24,12 +24,11 @@ def attractor(e: np.ndarray, xd: np.ndarray, vmax: float, beta: float) -> np.nda
     return beta * vmax * soft_normalize(e, 4 * vmax / (beta * np.log(2))) - beta * xd
 
 
-# RMP の列を関節空間で合成して関節の加速度を解き、h 秒進める。関節の加速度・速度が上限を超えるときは、向きを保ったまま全体を縮める
-def step(q, qd, leaves, vmax, amax, h: float) -> tuple[np.ndarray, np.ndarray]:
+# RMP の列を関節空間で合成して関節の加速度を解き、h 秒進める。関節の加速度・速度が上限を超えるときは、向きを保ったまま全体を縮める。limits は関節の可動範囲 (n,2) [rad]
+def step(q, qd, leaves, vmax, amax, limits, h: float) -> tuple[np.ndarray, np.ndarray]:
     M, f = sum(J.T @ M @ J for J, _, M in leaves), sum(J.T @ M @ a for J, a, M in leaves)
     qdd = np.linalg.solve(M, f)
     qdd *= min(1, np.min(amax / (np.abs(qdd) + 1e-12)))
-    limits = np.radians(np.asarray(arm.limits))
     stopping = qd**2 / (2 * amax) + np.abs(qd) * h
     qdd = np.where((qd > 0) & (limits[:, 1] - q <= stopping), np.minimum(qdd, -amax), qdd)
     qdd = np.where((qd < 0) & (q - limits[:, 0] <= stopping), np.maximum(qdd, amax), qdd)
@@ -41,9 +40,16 @@ def step(q, qd, leaves, vmax, amax, h: float) -> tuple[np.ndarray, np.ndarray]:
 
 
 # 先端の 4x4 変換・ヤコビアンと、関節が等速のときの先端の加速度 J̇q̇（少し先の姿勢のヤコビアンとの差から求める）
-def jacobian(q, qd) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    T, J = arm.jacobian(q)
-    return T, J, (arm.jacobian(q + 1e-6 * qd)[1] - J) @ qd / 1e-6
+def jacobian(robot_arm: Arm, q, qd) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    T, J = robot_arm.jacobian(q)
+    return T, J, (robot_arm.jacobian(q + 1e-6 * qd)[1] - J) @ qd / 1e-6
+
+
+# 7軸など冗長なアームで、先端を動かさない動き（ヌル空間）だけで関節角度を目標 qg へ寄せる RMP。ヤコビアンにヌル空間への射影 N = I - J⁺J を使うので先端の RMP と競合せず、
+# 障害物回避で肘などが回り込んだ後も目標の関節の形態へ戻す。強くしすぎると回避と張り合って遅くなる（6軸ではヌル空間がないので作らない）
+def null_space(J, q, qd, qg, vmax: float, beta: float, w: float = 0.005) -> list:
+    if len(q) <= 6: return []
+    return [(np.eye(len(q)) - np.linalg.pinv(J) @ J, attractor(qg - q, qd, vmax, beta), w * np.eye(len(q)))]
 
 
 class Avoidance:
@@ -70,7 +76,7 @@ class Avoidance:
     def result(self) -> float | None:
         return self.min_distance * 1000 if np.isfinite(self.min_distance) else None
 
-    # 組ごとの RMP（ヤコビアン 1×6, 加速度, 計量）
+    # 組ごとの RMP（ヤコビアン 1×軸数, 加速度, 計量）
     def leaves(self, q, qd) -> list:
         out = []
         for d0, Jd in self.pairs:
@@ -91,11 +97,12 @@ def substeps(dt: float) -> tuple[int, float]:
 # 先端の最大速度 [mm/s]・[deg/s] と最大加速度 [mm/s²]・[deg/s²] から各ポリシーの係数を決め、関節の速度・加速度は上限で頭打ちにする
 # avoid [mm] を指定すると、その影響距離で障害物回避 RMP を合成する（返り値の最後は軌道全体での障害物との最小距離 [mm]。回避なしなら None）
 def plan_rmp(start, goal, lin_vel, lin_acc, rot_vel, rot_acc, dt: float, avoid: float | None = None,
-             weights=(1.0, 0.3, 0.05), time_limit: float = 60.0, tol: float = 1e-2) -> tuple[list[float], list[list[float]], float | None]:
-    check_joint_limits(start, goal)
-    q, qd, qg = np.radians(start), np.zeros(6), np.radians(goal)
-    vmax, amax = np.radians(arm.max_vel), np.radians(arm.max_acc)
-    Tg = arm.forward(qg)[0]
+             weights=(1.0, 0.3, 0.05), time_limit: float = 60.0, tol: float = 1e-2, robot_arm: Arm | None = None) -> tuple[list[float], list[list[float]], float | None]:
+    robot_arm = robot_arm or arm
+    check_joint_limits(start, goal, robot_arm=robot_arm)
+    q, qd, qg = np.radians(start), np.zeros(len(start)), np.radians(goal)
+    vmax, amax, limits = np.radians(robot_arm.max_vel), np.radians(robot_arm.max_acc), np.radians(robot_arm.limits)
+    Tg = robot_arm.forward(qg)[0]
     # 先端の位置 [m]・姿勢 [rad] と関節 [rad] の各ポリシーの最大速度と減衰（β = 最大加速度 / 最大速度 で、動き出しの加速度が最大加速度になる）
     v_p, v_r, v_q = lin_vel / 1000, np.radians(rot_vel), np.min(vmax)
     b_p, b_r = lin_acc / lin_vel, rot_acc / rot_vel
@@ -108,12 +115,12 @@ def plan_rmp(start, goal, lin_vel, lin_acc, rot_vel, rot_acc, dt: float, avoid: 
     while ts[-1] < time_limit:
         if obs: obs.update(q)
         for _ in range(n):
-            T, J, Jdqd = jacobian(q, qd)
+            T, J, Jdqd = jacobian(robot_arm, q, qd)
             xd = J @ qd
             # 各 RMP（ヤコビアン, 加速度, 計量）。先端の位置・姿勢、関節、障害物回避の順
             q, qd = step(q, qd, [(J[:3], attractor(Tg[:3, 3] - T[:3, 3], xd[:3], v_p, b_p) - Jdqd[:3], w_p * np.eye(3)),
                                  (J[3:], attractor(rotvec(Tg[:3, :3] @ T[:3, :3].T), xd[3:], v_r, b_r) - Jdqd[3:], w_r * np.eye(3)),
-                                 (np.eye(6), attractor(qg - q, qd, v_q, b_p), w_q * np.eye(6)), *(obs.leaves(q, qd) if obs else [])], vmax, amax, h)
+                                 (np.eye(len(q)), attractor(qg - q, qd, v_q, b_p), w_q * np.eye(len(q))), *(obs.leaves(q, qd) if obs else [])], vmax, amax, limits, h)
         ts.append(len(ts) * dt)
         qs.append(q.copy())
         # 目標の関節角度に十分近づいて止まったら、最後の点を目標ちょうどにして終える
@@ -131,13 +138,14 @@ def plan_rmp(start, goal, lin_vel, lin_acc, rot_vel, rot_acc, dt: float, avoid: 
 # 接線方向へ経路の速度プロファイルで進みつつ横ずれを戻し、姿勢は最寄り点に割り振った姿勢へ引き寄せる。時刻ではなく経路上の位置で進むため、遅れても急がない
 # avoid [mm] を指定すると、その影響距離で障害物回避 RMP を合成する（返り値の最後は軌道全体での障害物との最小距離 [mm]。回避なしなら None）
 def plan_rmp_path(start, via, goal, lin_vel, lin_acc, rot_vel, rot_acc, blend: float, dt: float, avoid: float | None = None,
-                  weights=(1.0, 0.3, 1e-5), time_limit: float = 120.0, tol: float = 1e-2) -> tuple[list[float], list[list[float]], float | None]:
-    check_joint_limits(start, *via, goal)
-    q, qd, qg = np.radians(start), np.zeros(6), np.radians(goal)
-    vmax, amax = np.radians(arm.max_vel), np.radians(arm.max_acc)
+                  weights=(1.0, 0.3, 1e-5), time_limit: float = 120.0, tol: float = 1e-2, robot_arm: Arm | None = None) -> tuple[list[float], list[list[float]], float | None]:
+    robot_arm = robot_arm or arm
+    check_joint_limits(start, *via, goal, robot_arm=robot_arm)
+    q, qd, qg = np.radians(start), np.zeros(len(start)), np.radians(goal)
+    vmax, amax, limits = np.radians(robot_arm.max_vel), np.radians(robot_arm.max_acc), np.radians(robot_arm.limits)
     a_p, a_r = lin_acc / 1000, np.radians(rot_acc)
     w_p, w_r, w_q = weights
-    path = Path([arm.forward(np.radians(a))[0] for a in [start, *via, goal]], blend / 1000, lin_vel / 1000, a_p, np.radians(rot_vel))
+    path = Path([robot_arm.forward(np.radians(a))[0] for a in [start, *via, goal]], blend / 1000, lin_vel / 1000, a_p, np.radians(rot_vel))
     # 接線方向の進みは、速さの差に β = 最大加速度 / 最大速度 を掛けて合わせる（動き出しの加速度が最大加速度になる）
     # 横ずれ・姿勢のずれ・終点の詰めは、経路の速度プロファイルの最後（v = ω_end·r）と同じ速さで収まる硬い臨界減衰（β = 2ω_end）で戻す。戻す加速度は最大加速度まで
     last, b_t, b_fix = len(path.S) - 1, lin_acc / lin_vel, 2 * path.omega_end
@@ -148,7 +156,7 @@ def plan_rmp_path(start, via, goal, lin_vel, lin_acc, rot_vel, rot_acc, blend: f
     while ts[-1] < time_limit:
         if obs: obs.update(q)
         for _ in range(n):
-            T, J, Jdqd = jacobian(q, qd)
+            T, J, Jdqd = jacobian(robot_arm, q, qd)
             xd = J @ qd
             k = path.nearest(T[:3, 3], k)
             # 接線方向に進む速さ sd と、その変化（ひとつ前の刻みとの差）から求めた実際の加速度 sdd
@@ -166,13 +174,14 @@ def plan_rmp_path(start, via, goal, lin_vel, lin_acc, rot_vel, rot_acc, blend: f
             e_r = rotvec(path.orientation[k] @ T[:3, :3].T)
             a_rot = attractor(e_r, xd[3:] - path.rot_rate[k] * sd, a_r / b_fix, b_fix) + path.rot_rate[k] * sdd + path.drot_rate[k] * sd**2
             # 計量は横ずれ方向を強く、接線方向を弱くする（障害物回避などと合成したとき、横ずれを優先して抑えつつ進みを譲る）
-            # 関節は特異点付近で解を安定させるためのごく弱い正則化（強いと手首など腕の短い関節の動きが鈍り、収束が遅くなる）
+            # 関節は特異点付近で解を安定させるためのごく弱い正則化（強いと手首など腕の短い関節の動きが鈍り、収束が遅くなる）。冗長なアームでは、ヌル空間で目標の関節角度へ寄せる
             q, qd = step(q, qd, [(J[:3], a_lin - Jdqd[:3], w_p * (np.eye(3) - 0.5 * np.outer(t_hat, t_hat))), (J[3:], a_rot - Jdqd[3:], w_r * np.eye(3)),
-                                 (np.eye(6), np.zeros(6), w_q * np.eye(6)), *(obs.leaves(q, qd) if obs else [])], vmax, amax, h)
+                                 (np.eye(len(q)), np.zeros(len(q)), w_q * np.eye(len(q))), *null_space(J, q, qd, qg, np.min(vmax), b_t), *(obs.leaves(q, qd) if obs else [])], vmax, amax, limits, h)
         ts.append(len(ts) * dt)
         qs.append(q.copy())
         # 終点で止まったら、関節の形態が目標と同じか確かめ、最後の点を目標ちょうどにして終える
-        if k == last and np.linalg.norm(e) < 1e-5 and np.linalg.norm(e_r) < 1e-4 and np.max(np.abs(np.degrees(qd))) < tol:
+        # 冗長なアームはヌル空間の引き寄せで行き過ぎて折り返す瞬間にも止まって見えるので、関節角度が目標に着くまで待つ（着けなければ下の停止判定で止める）
+        if k == last and np.linalg.norm(e) < 1e-5 and np.linalg.norm(e_r) < 1e-4 and np.max(np.abs(np.degrees(qd))) < tol and (len(q) <= 6 or np.max(np.abs(np.degrees(q - qg))) < tol):
             if not np.allclose((np.degrees(q - qg) + 180) % 360 - 180, 0, atol=tol):
                 raise ValueError(f"経路の終点での関節角度 {np.round(np.degrees(q), 2).tolist()} が目標と一致しません（開始と目標で関節の形態が違います）")
             qs[-1] = qg
@@ -213,11 +222,12 @@ def chase(e: np.ndarray, ed: np.ndarray, vmax: float, amax: float, omega: float)
 # 姿勢は目標の姿勢へ同じ形で寄せる。ターゲットが止まらないので、duration [s] だけ動かして終える（長さ mm・速さ mm/s・角度 deg）
 # 返り値の最後は、障害物との最小距離 [mm]（回避なしなら None）、追いついた時刻 [s]（位置 1 mm・姿勢 1° 以内に初めて入った時刻。追いつかなければ None）、追いついた後の位置の最大誤差 [mm]
 def plan_rmp_track(start, goal, motion: str, speed: float, direction, radius: float, duration: float, lin_vel, lin_acc, rot_vel, rot_acc, dt: float,
-                   avoid: float | None = None, weights=(1.0, 0.3, 1e-5)) -> tuple[list[float], list[list[float]], float | None, float | None, float | None]:
-    check_joint_limits(start, goal)
-    q, qd = np.radians(start), np.zeros(6)
-    vmax, amax = np.radians(arm.max_vel), np.radians(arm.max_acc)
-    Tg = arm.forward(np.radians(goal))[0]
+                   avoid: float | None = None, weights=(1.0, 0.3, 1e-5), robot_arm: Arm | None = None) -> tuple[list[float], list[list[float]], float | None, float | None, float | None]:
+    robot_arm = robot_arm or arm
+    check_joint_limits(start, goal, robot_arm=robot_arm)
+    q, qd, qg = np.radians(start), np.zeros(len(start)), np.radians(goal)
+    vmax, amax, limits = np.radians(robot_arm.max_vel), np.radians(robot_arm.max_acc), np.radians(robot_arm.limits)
+    Tg = robot_arm.forward(qg)[0]
     target = target_motion(Tg[:3, 3], motion, speed / 1000, direction, radius / 1000)
     # 先端の位置 [m]・姿勢 [rad] の最大速度・加速度。最後に距離に比例させる ω は経路追従の終点と同じ（5 mm 手前から比例）
     v_p, a_p, v_r, a_r = lin_vel / 1000, lin_acc / 1000, np.radians(rot_vel), np.radians(rot_acc)
@@ -230,17 +240,17 @@ def plan_rmp_track(start, goal, motion: str, speed: float, direction, radius: fl
     for i in range(int(round(duration / dt))):
         if obs: obs.update(q)
         for j in range(n):
-            T, J, Jdqd = jacobian(q, qd)
+            T, J, Jdqd = jacobian(robot_arm, q, qd)
             xd = J @ qd
             p_t, v_t, a_t = target(i * dt + j * h)
-            # 各 RMP。先端の位置（ターゲットとの相対）・姿勢、特異点付近の安定用のごく弱い関節の正則化、障害物回避の順
+            # 各 RMP。先端の位置（ターゲットとの相対）・姿勢、特異点付近の安定用のごく弱い関節の正則化、冗長なアームのヌル空間の引き寄せ（目標の関節角度へ）、障害物回避の順
             q, qd = step(q, qd, [(J[:3], chase(p_t - T[:3, 3], xd[:3] - v_t, v_p, a_p, omega) + a_t - Jdqd[:3], w_p * np.eye(3)),
                                  (J[3:], chase(rotvec(Tg[:3, :3] @ T[:3, :3].T), xd[3:], v_r, a_r, omega) - Jdqd[3:], w_r * np.eye(3)),
-                                 (np.eye(6), np.zeros(6), w_q * np.eye(6)), *(obs.leaves(q, qd) if obs else [])], vmax, amax, h)
+                                 (np.eye(len(q)), np.zeros(len(q)), w_q * np.eye(len(q))), *null_space(J, q, qd, qg, np.min(vmax), lin_acc / lin_vel), *(obs.leaves(q, qd) if obs else [])], vmax, amax, limits, h)
         ts.append(len(ts) * dt)
         qs.append(q.copy())
         # 追いついたか（位置 1 mm・姿勢 1° 以内）と、追いついた後の位置の誤差を記録する
-        T = arm.forward(q)[0]
+        T = robot_arm.forward(q)[0]
         e = np.linalg.norm(target(ts[-1])[0] - T[:3, 3]) * 1000
         if caught is None and e < 1 and np.degrees(np.linalg.norm(rotvec(Tg[:3, :3] @ T[:3, :3].T))) < 1: caught = ts[-1]
         if caught is not None: err_max = max(err_max, e)
@@ -248,6 +258,7 @@ def plan_rmp_track(start, goal, motion: str, speed: float, direction, radius: fl
 
 
 # 画面での表示用に、ターゲットの位置 [mm] を step [s] ごとに並べる（初期位置は目標の関節角度での先端位置）
-def track_target_path(goal, motion: str, speed: float, direction, radius: float, duration: float, step: float = 0.1) -> list[list[float]]:
-    target = target_motion(arm.forward(np.radians(goal))[0][:3, 3], motion, speed / 1000, direction, radius / 1000)
+def track_target_path(goal, motion: str, speed: float, direction, radius: float, duration: float, step: float = 0.1, robot_arm: Arm | None = None) -> list[list[float]]:
+    robot_arm = robot_arm or arm
+    target = target_motion(robot_arm.forward(np.radians(goal))[0][:3, 3], motion, speed / 1000, direction, radius / 1000)
     return [(target(t)[0] * 1000).tolist() for t in np.append(np.arange(0, duration, step), duration)]

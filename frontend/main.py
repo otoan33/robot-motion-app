@@ -14,6 +14,8 @@ viser_api = httpx.AsyncClient(base_url=os.environ.get("VISER_API_URL", "http://1
 MODE_LABELS = {"ptp": "PTP（関節補間・台形速度）", "lin": "LIN（直線補間・台形速度）", "rmp": "PTP（RMP 目標到達ポリシー）", "rmp_path": "経路追従（RMP・経由点の折れ線）",
                "rmp_track": "追従（RMP・動くターゲット）", "calib": "測定動作（レーザートラッカー校正）",
                "calib_axis": "単軸動作（レーザートラッカー校正）"}
+# 軸数ごとの開始位置・目標位置の初期値 [deg]（ほかの軸数は全軸 0°）
+DEFAULT_POSES = {6: ([0, -20, 30, 0, 40, 0], [40, -10, 20, 0, 60, 30]), 7: ([0, 30, 0, -60, 0, 45, 0], [40, 20, 30, -70, 20, 50, 30])}
 
 
 # /tool の ZYX オイラー角から、SMR オフセットとミラーが向くローカル +Z 方向を求める
@@ -26,12 +28,15 @@ def tool_target(tool: dict[str, float]) -> tuple[list[float], list[float]]:
 
 @ui.page("/")
 async def index(request: Request):
-    info = (await client.get("/modes")).json()
+    # robot-viser-app で表示中のアームで軌道を作る（入力欄の軸数・可動範囲もそのアームに合わせる）
+    arm_name = (await viser_api.get("/robots")).json()["current"]["arm"]
+    info = (await client.get("/modes", params={"arm": arm_name})).json()
+    n_joints = len(info["joint_limits"])
     defaults = info["defaults"]
     # 最後に生成した軌道の CSV（再生・保存に使う）。測定動作では、保存には全ポイントの CSV（points_csv）を使う
     state = {"csv": None, "points_csv": None}
 
-    # 6軸分の数値入力を並べる（制限値は桁が少ないので6列で詰める）
+    # 軸数分の数値入力を並べる
     def joint_inputs(values: list[float], columns: int = 3):
         with ui.grid(columns=columns).classes("w-full"):
             return [ui.number(f"J{i}", value=v, min=info["joint_limits"][i - 1][0], max=info["joint_limits"][i - 1][1]).classes("w-full") for i, v in enumerate(values, 1)]
@@ -49,13 +54,14 @@ async def index(request: Request):
             with ui.card().classes("w-full"):
                 ui.label("動作モード").classes("text-lg font-bold")
                 mode = ui.select({m: MODE_LABELS.get(m, m) for m in info["modes"]}, value=info["modes"][0]).classes("w-full")
+                ui.label(f"アーム: {arm_name}（{n_joints} 軸。robot-viser-app で切り替えたら、このページを再読み込みする）").classes("text-xs text-gray-500")
 
             # 開始位置・目標位置 [deg]。「表示」で robot-viser にその姿勢を表示して確認する
             async def show_pose(inputs): (await viser_api.post("/joints", json={"angles": [n.value for n in inputs]})).raise_for_status()
             # 入力中の関節角度での先端位置・姿勢を表示する（LIN の直線の両端の確認用）
             async def update_tcp(inputs, label):
                 if any(n.value is None for n in inputs): return
-                tcp = (await client.post("/fk", json={"angles": [n.value for n in inputs]})).json()
+                tcp = (await client.post("/fk", json={"arm": arm_name, "angles": [n.value for n in inputs]})).json()
                 label.text = "先端 XYZ [mm] " + ", ".join(f"{v:.1f}" for v in tcp["position"]) + " / RPY [deg] " + ", ".join(f"{v:.1f}" for v in tcp["rpy"])
             def pose_card(title: str, values: list[float]):
                 with ui.card().classes("w-full") as card:
@@ -67,7 +73,8 @@ async def index(request: Request):
                     buttons = ui.row()
                     with buttons: ui.button("表示", on_click=lambda: show_pose(inputs)).props("flat")
                 return inputs, buttons, card
-            start, _, start_card = pose_card("開始位置 [deg]", [0, -20, 30, 0, 40, 0])
+            default_start, default_goal = DEFAULT_POSES.get(n_joints, ([0] * n_joints, [0] * n_joints))
+            start, _, start_card = pose_card("開始位置 [deg]", default_start)
             # 測定動作・単軸動作は全軸 0° から始まり 0° に戻るので、開始・目標は使わない
             start_card.bind_visibility_from(mode, "value", backward=lambda m: m not in ("calib", "calib_axis"))
 
@@ -83,7 +90,7 @@ async def index(request: Request):
                 ui.button("経由点を追加", on_click=add_via).props("flat")
 
             # 追従では、目標位置の先端姿勢がターゲットの動き出す位置になる
-            goal, goal_buttons, goal_card = pose_card("目標位置 [deg]", [40, -10, 20, 0, 60, 30])
+            goal, goal_buttons, goal_card = pose_card("目標位置 [deg]", default_goal)
             goal_card.bind_visibility_from(mode, "value", backward=lambda m: m not in ("calib", "calib_axis"))
             with goal_buttons:
                 # 往復動作を作りやすいよう、開始と目標を入れ替える（経由点は順番を逆にする）
@@ -158,10 +165,10 @@ async def index(request: Request):
                         avoid = ui.checkbox("障害物を避ける")
                         avoid_distance = ui.number("影響距離 [mm]", value=100, min=1).classes("w-32")
 
-            # 軌道（CSV テキスト。ヘッダ t,joint1..6）を関節角度の時系列グラフにする
+            # 軌道（CSV テキスト。ヘッダ t,joint1..jointN）を関節角度の時系列グラフにする
             def show_chart(csv: str) -> list[list[float]]:
                 rows = [[float(v) for v in line.split(",")] for line in csv.splitlines()[1:]]
-                chart.options["series"] = [{"name": f"J{j}", "type": "line", "showSymbol": False, "data": [[r[0], r[j]] for r in rows]} for j in range(1, 7)]
+                chart.options["series"] = [{"name": f"J{j}", "type": "line", "showSymbol": False, "data": [[r[0], r[j]] for r in rows]} for j in range(1, len(rows[0]))]
                 chart.update()
                 chart.set_visibility(True)
                 return rows
@@ -226,9 +233,11 @@ async def index(request: Request):
 
             # 生成した軌道をグラフで確認し、robot-viser での再生や CSV 保存に使う
             async def generate():
+                # 別のアームの軌道を robot-viser で再生しないよう、表示中のアームが変わっていたら作り直しを促す
+                if (await viser_api.get("/robots")).json()["current"]["arm"] != arm_name: return ui.notify("robot-viser-app のアームが切り替わりました。ページを再読み込みしてください", type="warning")
                 if mode.value == "calib": return await generate_calib()
                 if mode.value == "calib_axis": return await generate_calib_axis()
-                req = {"mode": mode.value, "start": [n.value for n in start], "via": [[n.value for n in v] for v in vias], "goal": [n.value for n in goal], "blend": blend.value,
+                req = {"mode": mode.value, "arm": arm_name, "start": [n.value for n in start], "via": [[n.value for n in v] for v in vias], "goal": [n.value for n in goal], "blend": blend.value,
                        "lin_vel": lin_vel.value, "lin_acc": lin_acc.value, "rot_vel": rot_vel.value, "rot_acc": rot_acc.value,
                        "dt": dt.value, "duration": duration.value, "track_motion": track_motion.value, "track_speed": track_speed.value, "track_dir": [n.value for n in track_dir],
                        "track_radius": track_radius.value, "track_time": track_time.value}
